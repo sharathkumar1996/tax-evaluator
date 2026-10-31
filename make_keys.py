@@ -37,7 +37,7 @@ HOW = [
     ("Line - any other box", "text: <label printed on the form>   e.g.  text: Principal business or profession\n"
                              "check: <label printed next to the box>   e.g.  check: Cash   (add  | near: <words on the same row>  "
                              "if the label appears more than once)."),
-    ("Correct Value", "Amounts as whole numbers (52000, not $52,000; negative -500). Text exactly as it should appear. "
+    ("Correct Value", "Amounts as whole numbers (48000, not $48,000; negative -500). Text exactly as it should appear. "
                       "Filing status S, MFJ, MFS, HOH or QW. Checkboxes: Checked / Unchecked. Leave blank if the box must be empty."),
     ("Marks", "Marks for this step. Any difference from the key loses the full marks for the step."),
     ("Tolerance ($)", "Allowed difference for rounding only. Usually 1 for amounts, 0 for everything else."),
@@ -145,7 +145,7 @@ def draft_from_return(pdf_bytes, case_id, title, year, marks=1, unexpected=1):
 
 if __name__ == "__main__":
     build("C00", "Case title here", 2020,
-          [(1, "Income", "1040", "1", "Wages, salaries, tips", 52000, 5, 1,
+          [(1, "Income", "1040", "1", "Wages, salaries, tips", 48000, 5, 1,
             "EXAMPLE ROW - replace. Line 1 is W-2 box 1 wages.")], unexpected=1, blank_rows=59,
           path="answer_key_template.xlsx")
     print("template built")
