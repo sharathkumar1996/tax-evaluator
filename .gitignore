@@ -1,0 +1,6 @@
+# Never commit answer keys or student returns to the repository
+answer_key_C*.xlsx
+*.pdf
+tests/out/
+.streamlit/secrets.toml
+__pycache__/
