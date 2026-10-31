@@ -81,13 +81,13 @@ def _identify(page):
     full = (page.extract_text() or "")[:400]
     for txt in (head, full):
         cont = bool(re.search(r"\bPage\s+\d\b", txt))
-        m = re.search(r"\bSCHEDULE\s+([A-Z0-9]{1,4}(?:-[A-Z]{1,3})?)\b[^\n]{0,15}\(Form\s+1040", txt, re.I)
+        m = re.search(r"\bSCHEDULE\s+([A-Z0-9]{1,4}(?:-[A-Z]{1,3})?)\b[\s\S]{0,140}?\(Form\s+1040", txt, re.I)
         if m:
             return "SCH " + m.group(1).upper(), cont
         if "U.S. Individual Income Tax Return" in txt or re.search(r"\bForm\s+1040(-SR)?\s*\(\d{4}\)", txt):
             return "1040", cont
-        m = re.search(r"\bForm\s+(W-2G?|\d{3,4}[A-Z]{0,2}(?:-[A-Z]{1,3})?)\b", txt)
-        if m:
+        m = re.search(r"(?:^|\n)\s*Form\s+(W-2G?|\d{3,4}[A-Z]{0,2}(?:-[A-Z]{1,3})?)\b", txt)
+        if m and not m.group(1).startswith("1040"):
             return m.group(1).upper(), cont
     return None, False
 
@@ -96,7 +96,8 @@ def _identify(page):
 def _tokens(page):
     """Split a page into tokens: bold line numbers vs regular text/amounts.
     Spaces and dot leaders are dropped; a change of boldness starts a new token."""
-    chars = [c for c in page.chars if c["text"] not in (" ", ".", " ")]
+    chars = [c for c in page.chars if c["text"].strip() and c["text"] != "\u00a0"
+             and not (c["text"] == "." and c["size"] < DATA_MIN_SIZE)]      # drop dot leaders, keep decimals
     chars.sort(key=lambda c: (round(c["top"]), c["x0"]))
     toks = []
     for c in chars:
@@ -211,7 +212,7 @@ class _PageText:
         b = boxes[0]
         right = self._next_label_x(b)
         got = [w for w in self.data if b["bottom"] - 1 <= w["top"] <= b["bottom"] + 16
-               and b["x0"] - 4 <= w["x0"] < right - 2]
+               and b["x0"] - 4 <= w["x0"] < right - 4]
         if not got:   # value printed on the same row, to the right of the label
             got = [w for w in self.data if abs(w["cy"] - (b["top"] + b["bottom"]) / 2) <= 5
                    and b["x1"] < w["x0"] < right]
@@ -236,7 +237,7 @@ F1040_FIELDS = {
     "first_name": ("text", 1, "Your first name and middle initial", None),
     "last_name": ("text", 1, "Last name", "Your first name"),
     "ssn": ("text", 1, "Your social security number", None),
-    "spouse_first_name": ("text", 1, "spouse's first name and middle initial", None),
+    "spouse_first_name": ("text", 1, "If joint return, spouse's first name", None),
     "spouse_last_name": ("text", 1, "Last name", "spouse's first name"),
     "spouse_ssn": ("text", 1, "Spouse's social security number", None),
     "address": ("text", 1, "Home address (number and street)", None),
@@ -339,8 +340,25 @@ class ReturnPDF:
         return self._deps
 
     # ---- numbered line lookup
+    @staticmethod
+    def _col_x(toks, lab, col):
+        """x-centre of a column heading such as '(h)' or 'A' printed above the row."""
+        want = col.lower().strip("()")
+        heads = [t for t in toks if t["text"].lower().strip("()") == want and t["text"].strip("()") != t["text"] or
+                 (t["text"].lower() == want and len(want) == 1 and t["size"] < DATA_MIN_SIZE)]
+        heads = [t for t in heads if 0 < lab["top"] - t["top"] < 260]
+        if not heads:
+            return None
+        h = min(heads, key=lambda t: lab["top"] - t["top"])
+        return (h["x0"] + h["x1"]) / 2
+
     def _line(self, copy, ln):
-        """(value, printed) for a numbered/lettered line on a form copy; (None, False) if no such line."""
+        """(value, printed) for a numbered/lettered line on a form copy; (None, False) if no such line.
+        ln may name a column: '1a (h)' or '3 (A)'."""
+        col = None
+        m = re.match(r"^(.+?)\s*\(([a-z])\)$", ln)
+        if m:
+            ln, col = m.group(1).strip(), m.group(2)
         best = None
         for toks in copy.tokens:
             for lab in [t for t in toks if t["bold"] and t["text"].lower() == ln]:
@@ -350,8 +368,16 @@ class ReturnPDF:
                 data = [t for t in toks if not t["bold"] and t["size"] >= DATA_MIN_SIZE
                         and lab["x1"] < t["x0"] < stop and abs(t["cy"] - lab["cy"]) <= ROW_TOL]
                 amts = [t for t in data if MONEY.match(t["text"])]
+                if col:
+                    cx = self._col_x(toks, lab, col)
+                    if cx is None:
+                        continue
+                    amts = [t for t in amts if abs((t["x0"] + t["x1"]) / 2 - cx) < 45 or t["x0"] - 6 <= cx <= t["x1"] + 6]
+                    data = amts
                 if amts:
-                    score, v, printed = 3 + lab["x0"] / 1000, _to_number(min(amts, key=lambda t: t["x0"])["text"]), True
+                    pick = min(amts, key=lambda t: t["x0"]) if not col else \
+                        min(amts, key=lambda t: abs((t["x0"] + t["x1"]) / 2 - cx))
+                    score, v, printed = 3 + lab["x0"] / 1000, _to_number(pick["text"]), True
                 elif data:
                     data.sort(key=lambda t: t["x0"])
                     score, v, printed = 2 + lab["x0"] / 1000, " ".join(t["text"] for t in data), True
@@ -433,13 +459,39 @@ class ReturnPDF:
                     ln = lab["text"].lower()
                     if not lab["bold"] or not LABEL.match(ln) or ln in seen:
                         continue
+                    seen.add(ln)
+                    cols = self._row_columns(toks, lab)
+                    if cols:
+                        for cname in cols:
+                            v, printed = self._line(copy, f"{ln} ({cname})")
+                            if printed:
+                                out.append({"form": fname, "line": f"{lab['text']} ({cname})", "value": v, "desc": ""})
+                        continue
                     v, printed = self._line(copy, ln)
                     if not printed:
                         continue
-                    seen.add(ln)
                     out.append({"form": fname, "line": lab["text"], "value": v,
                                 "desc": self._describe(pt, lab)})
         return out
+
+    def _row_columns(self, toks, lab):
+        """Column headings for a row that carries 2+ amounts (e.g. Schedule D 1a: d, e, g, h)."""
+        row_labels = [t for t in toks if t["bold"] and LABEL.match(t["text"].lower())
+                      and abs(t["cy"] - lab["cy"]) <= ROW_TOL and t["x0"] > lab["x1"] + 1]
+        stop = min([t["x0"] for t in row_labels], default=1e9)
+        amts = [t for t in toks if not t["bold"] and t["size"] >= DATA_MIN_SIZE and MONEY.match(t["text"])
+                and lab["x1"] < t["x0"] < stop and abs(t["cy"] - lab["cy"]) <= ROW_TOL]
+        if len(amts) < 2:
+            return []
+        heads = [t for t in toks if re.fullmatch(r"\([a-z]\)", t["text"]) and 0 < lab["top"] - t["top"] < 260]
+        names = []
+        for a in amts:
+            ac = (a["x0"] + a["x1"]) / 2
+            near = [h for h in heads if abs((h["x0"] + h["x1"]) / 2 - ac) < 45]
+            if near:
+                h = min(near, key=lambda h: (lab["top"] - h["top"]) + abs((h["x0"] + h["x1"]) / 2 - ac))
+                names.append(h["text"].strip("()"))
+        return list(dict.fromkeys(names))
 
     @staticmethod
     def _describe(pt, lab):
@@ -648,9 +700,9 @@ def _match(student, correct, tol):
     if re.fullmatch(r"[\d\s-]{9,11}", str(c).strip()):          # SSN / EIN: compare digits
         return re.sub(r"\D", "", str(c)) == re.sub(r"\D", "", str(s))
     if cs in ("x", "checked", "yes-checked"):
-        return str(s) == "Checked"
+        return ss_ in ("x", "checked", "\u2713", "\u2714")
     if cs in ("unchecked", "blank"):
-        return str(s) in ("Unchecked", "")
+        return ss_ in ("unchecked", "")
     return _clean_text(c) == _clean_text(s)
 
 

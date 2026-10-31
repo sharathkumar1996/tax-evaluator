@@ -62,6 +62,7 @@ feedback, then upload it as the key.
 Each row is Category, Form (`1040`, `Schedule C`, `Schedule SE`, `Form 8863`, `Schedule C #2` ...),
 Line, Correct Value, Marks, Tolerance and Feedback. Line can be:
 - a printed line number: `1`, `2b`, `25a`, `31` (lettered lines like Schedule C `B` work too)
+- a column on a multi-column row: `1a (h)`, `8a (d)` on Schedule D (the column letter printed above the row)
 - a Form 1040 field: `FS`, `first_name`, `last_name`, `ssn`, `spouse_first_name`, `spouse_last_name`,
   `spouse_ssn`, `address`, `apt`, `city`, `state`, `zip`, `virtual_currency`, `occupation`,
   `spouse_occupation`, and the age/blindness/dependent-of-someone checkboxes
