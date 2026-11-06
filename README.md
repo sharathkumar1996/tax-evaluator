@@ -16,6 +16,9 @@ Nothing is stored on the server. The key, returns and results exist only in the 
 | `app.py` | The Streamlit app |
 | `grader_core.py` | Reads ATX PDFs (1040 + schedules/forms) and marks them against the key |
 | `report_pdf.py` | Builds the student PDF report |
+| `db.py` | Saves students, batches, case keys, scores and mistakes (Neon Postgres) |
+| `metrics.py` | File-ready rate, bottom-line accuracy, average errors per return |
+| `mgmt_report.py` | Management PDF / Excel and the consolidated student report |
 | `answer_key_template.xlsx` | Blank key for trainers (downloadable inside the app) |
 | `make_keys.py` | Template builder and the 'build key from a correct return' function |
 | `requirements.txt`, `.streamlit/config.toml` | Deployment settings |
@@ -48,6 +51,30 @@ Notes
   the wake-up button and waits about a minute.
 - To update the app, edit or re-upload files on GitHub. Streamlit redeploys automatically.
 
+## Saving results permanently (Neon database)
+
+Without a database the app works, but results disappear when the browser tab closes.
+With one, every evaluation is saved, and the **Management dashboard**, **Find a report** and
+**Students & batches** tabs become available.
+
+1. Create a free account at neon.com and a project (any name, region close to your users).
+2. On the project dashboard click **Connect** and copy the connection string. It looks like
+   `postgresql://neondb_owner:...@ep-....neon.tech/neondb?sslmode=require`
+3. In Streamlit, open the app's **Settings → Secrets** and add a line:
+   ```toml
+   database_url = "postgresql://neondb_owner:...@ep-....neon.tech/neondb?sslmode=require"
+   ```
+4. Save. The app restarts, creates its tables, and the sidebar shows **Database connected**.
+
+Only scores and mistakes are stored, not the returns: about 20 rows per return, so 7,200 returns
+fit easily in the free 1 GB. The sidebar shows how much space is used.
+
+## Going back to the previous version
+
+The branch `stable-v1` is the version without a database. To go back, open the app's
+**Settings** in Streamlit and change the branch to `stable-v1`, or deploy a second app from it.
+Data already saved in Neon is not affected.
+
 ## Run on a laptop instead
 ```
 pip install -r requirements.txt
@@ -70,6 +97,11 @@ Line, Correct Value, Marks, Tolerance and Feedback. Line can be:
 - any other box: `text: <printed label>` or `check: <printed label>` (add `| near: <words>` if needed)
 
 Leave Correct Value blank when the box must be empty.
+
+## Bulk evaluation
+Choose **Many returns at once (bulk)**, then upload several PDFs or one zip. Files must be named
+`StudentID_CaseID.pdf`; files for another case, badly named files and (optionally) students
+already evaluated are skipped and listed. Upload large batches in parts of about 100 returns.
 
 ## Limits to know
 - Calibrated on **ATX 2020** output. A different ATX year or version: run one return through it and

@@ -70,7 +70,8 @@ def _lineref(r):
     return f"{r['Form']} - {r['Description']}" if not ln.lower().startswith(("text:", "check:")) else f"{r['Form']}"
 
 
-def build_report(student_name, student_id, key, rows, cats, total, out_of, file_name, institute):
+def build_report(student_name, student_id, key, rows, cats, total, out_of, file_name, institute,
+                 evaluated_on=None, status_line=None):
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=14 * mm, rightMargin=14 * mm,
                             topMargin=14 * mm, bottomMargin=16 * mm,
@@ -85,7 +86,7 @@ def build_report(student_name, student_id, key, rows, cats, total, out_of, file_
     story.append(Spacer(1, 6))
 
     info = [[_p("Student"), _p(student_name or "-"), _p("Student ID"), _p(student_id or "-")],
-            [_p("Return file"), _p(file_name), _p("Evaluated on"), _p(datetime.now().strftime("%d %b %Y, %H:%M"))]]
+            [_p("Return file"), _p(file_name), _p("Evaluated on"), _p(evaluated_on or datetime.now().strftime("%d %b %Y, %H:%M"))]]
     t = Table(info, colWidths=[22 * mm, W / 2 - 22 * mm, 24 * mm, W / 2 - 24 * mm])
     t.setStyle(TableStyle([("BACKGROUND", (0, 0), (0, -1), LIGHT), ("BACKGROUND", (2, 0), (2, -1), LIGHT),
                            ("BOX", (0, 0), (-1, -1), 0.5, LINE), ("INNERGRID", (0, 0), (-1, -1), 0.4, LINE),
@@ -101,7 +102,8 @@ def build_report(student_name, student_id, key, rows, cats, total, out_of, file_
     extra = f" &nbsp; <font color='#C0392B'>{n_unx} unexpected entr{'y' if n_unx == 1 else 'ies'}</font>" if n_unx else ""
     score = Table([[Paragraph(f"{total:g} / {out_of:g}", big),
                     Paragraph(f"<b>{pct:.0%}</b> overall<br/><font color='#2E7D4F'>{n_ok} correct</font> &nbsp; "
-                              f"<font color='#C0392B'>{n_bad} wrong</font> &nbsp; of {n_keyed} items checked{extra}", BODY)]],
+                              f"<font color='#C0392B'>{n_bad} wrong</font> &nbsp; of {n_keyed} items checked{extra}"
+                              + (f"<br/>{status_line}" if status_line else ""), BODY)]],
                   colWidths=[45 * mm, W - 45 * mm])
     score.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), LIGHT), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
                                ("TOPPADDING", (0, 0), (-1, -1), 8), ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
