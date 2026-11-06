@@ -65,16 +65,21 @@ if PASSWORD and not st.session_state.get("authed"):
 
 # ------------------------------------------------------------------ database
 @st.cache_resource(show_spinner="Connecting to the database...")
-def get_db(url):
-    from db import DB
-    return DB(url)
+def get_db(url, code_version):
+    # code_version makes Streamlit open a fresh connection whenever db.py changes after an update,
+    # instead of reusing a connection object built from the old code
+    import importlib
+    import db as dbmod
+    importlib.reload(dbmod)
+    return dbmod.DB(url)
 
 
 DB_URL = secret("database_url")
+DB_CODE_VERSION = hashlib.sha256((HERE / "db.py").read_bytes()).hexdigest()[:12]
 db, db_error = None, None
 if DB_URL:
     try:
-        db = get_db(DB_URL)
+        db = get_db(DB_URL, DB_CODE_VERSION)
     except Exception as e:  # keep the app usable without the database
         db_error = str(e)
 
