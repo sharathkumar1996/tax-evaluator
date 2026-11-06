@@ -158,9 +158,9 @@ with st.sidebar:
         st.download_button("Download blank answer-key template", tpl.read_bytes(), file_name="answer_key_template.xlsx")
 
 st.title("Tax Return Evaluator")
-t_eval, t_students, t_mgmt, t_find, t_build, t_help = st.tabs(
+t_eval, t_students, t_mgmt, t_find, t_build, t_data, t_help = st.tabs(
     ["Evaluate returns", "Students & batches", "Management dashboard", "Find a report",
-     "Build a key from a correct return", "How it works"])
+     "Build a key from a correct return", "Data management", "How it works"])
 
 
 def evaluate_pdf(data, file_name, sid, sname, key):
@@ -546,6 +546,74 @@ with t_build:
                 st.success(f"{n} items found on: {', '.join(forms)}")
                 st.download_button("Download draft answer key (.xlsx)", data, file_name=f"answer_key_{clean(cid)}.xlsx")
 
+# ------------------------------------------------------------------ data management
+with t_data:
+    if not db:
+        st.info("Nothing is stored without a database - results disappear when this tab closes.")
+    else:
+        st.subheader("Data management")
+        ADMIN = secret("admin_password") or PASSWORD
+        if ADMIN and not ss.get("admin_ok"):
+            st.write("Erasing data needs the admin password.")
+            apw = st.text_input("Admin password", type="password", key="adminpw")
+            if st.button("Unlock"):
+                if apw == ADMIN:
+                    ss.admin_ok = True
+                    st.rerun()
+                else:
+                    st.error("Wrong admin password.")
+        else:
+            n = db.counts()
+            c = st.columns(4)
+            c[0].metric("Students on roster", n["students"])
+            c[1].metric("Saved cases", n["cases"])
+            c[2].metric("Evaluated returns", n["evaluations"])
+            c[3].metric("Saved mistakes", n["mistakes"])
+            st.warning("Erasing cannot be undone. Download the management workbook first if you may need the results.")
+
+            def danger(label, key, action, done_msg):
+                """Two-step confirmation: tick the box, then press the button."""
+                if st.checkbox(f"I understand - {label}", key=f"ok_{key}"):
+                    if st.button(label, key=f"btn_{key}", type="primary"):
+                        action()
+                        st.success(done_msg)
+                        st.rerun()
+
+            case_ids = [x["case_id"] for x in db.cases()]
+            with st.expander("Erase the results of one case (keeps its answer key)"):
+                cx = st.selectbox("Case", case_ids, key="er_case") if case_ids else None
+                if cx:
+                    st.caption(f"{db.case_eval_count(cx)} evaluated returns for {cx}.")
+                    danger(f"Erase all results for {cx}", "case_res", lambda: db.erase_case_results(cx),
+                           f"Results for {cx} erased.")
+            with st.expander("Delete a case completely (answer key and all its results)"):
+                cy = st.selectbox("Case", case_ids, key="er_case2") if case_ids else None
+                if cy:
+                    danger(f"Delete case {cy}", "case_all", lambda: db.erase_case(cy), f"Case {cy} deleted.")
+            with st.expander("Erase a batch"):
+                bl = db.batches()
+                bx = st.selectbox("Batch", bl, key="er_batch") if bl else None
+                if bx:
+                    roster_too = st.checkbox("Also remove these students from the roster", value=True, key="er_roster")
+                    danger(f"Erase batch {bx}", "batch", lambda: db.erase_batch(bx, roster_too), f"Batch {bx} erased.")
+            with st.expander("Erase one student (roster entry and all their results)"):
+                sx = st.text_input("Student ID", key="er_sid").strip().upper()
+                if sx:
+                    danger(f"Erase student {sx}", "student", lambda: db.erase_student(sx), f"Student {sx} erased.")
+            with st.expander("Erase results of student IDs that are not on the roster"):
+                st.caption("Useful after test runs with made-up IDs.")
+                danger("Erase results of unlisted IDs", "unlisted", db.erase_unlisted, "Done.")
+            with st.expander("Erase EVERYTHING (start fresh)"):
+                st.caption("Removes the roster, all saved cases and all results.")
+                typed = st.text_input("Type ERASE ALL to confirm", key="er_all_txt")
+                if typed.strip() == "ERASE ALL" and st.button("Erase everything", type="primary", key="er_all"):
+                    db.erase_all()
+                    st.success("All data erased.")
+                    st.rerun()
+            if st.button("Lock this tab"):
+                ss.admin_ok = False
+                st.rerun()
+
 # ------------------------------------------------------------------ help
 with t_help:
     st.markdown(f"""
@@ -565,6 +633,9 @@ with t_help:
 
 **How marks are given**: any difference from the key loses that item's marks; amounts on lines that should be blank
 deduct the marks set in the key; a missing form makes all its items wrong; unreadable items are flagged for review.
+
+**Erasing data**: the **Data management** tab (admin password) erases a case's results, a whole case, a batch, a
+student, or everything.
 
 **Privacy**: student returns are not stored - only scores and mistakes. Without a database nothing is kept after the tab closes.
 """)

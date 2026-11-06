@@ -69,6 +69,14 @@ With one, every evaluation is saved, and the **Management dashboard**, **Find a 
 Only scores and mistakes are stored, not the returns: about 20 rows per return, so 7,200 returns
 fit easily in the free 1 GB. The sidebar shows how much space is used.
 
+## Erasing data
+The **Data management** tab erases one case's results, a whole case, a batch, one student, results of IDs
+not on the roster, or everything. It is protected by `admin_password` (Secrets); if that is not set, the
+staff password is used. Erasing cannot be undone.
+
+Tip: give the test app its own Neon branch (Neon: Branches -> Create branch) and use that branch's
+connection string in the test app, so test data never mixes with real results.
+
 ## Going back to the previous version
 
 The branch `stable-v1` is the version without a database. To go back, open the app's

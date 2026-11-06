@@ -225,6 +225,50 @@ class DB:
         self.run("DELETE FROM mistakes WHERE student_id = ? AND case_id = ?", (sid, case_id))
         self.run("DELETE FROM evaluations WHERE student_id = ? AND case_id = ?", (sid, case_id))
 
+    # ------------------------------------------------------------ erasing data
+    def counts(self):
+        out = {}
+        for t in ("students", "cases", "evaluations", "mistakes"):
+            out[t] = self.rows(f"SELECT COUNT(*) AS n FROM {t}")[0]["n"]
+        return out
+
+    def batches(self):
+        return [r["batch"] for r in self.rows("SELECT DISTINCT batch FROM students ORDER BY batch")]
+
+    def erase_case_results(self, case_id):
+        """Delete all evaluations of a case; keep the answer key."""
+        self.run("DELETE FROM mistakes WHERE case_id = ?", (case_id,))
+        self.run("DELETE FROM evaluations WHERE case_id = ?", (case_id,))
+
+    def erase_case(self, case_id):
+        """Delete a case's answer key and all its evaluations."""
+        self.erase_case_results(case_id)
+        self.run("DELETE FROM cases WHERE case_id = ?", (case_id,))
+
+    def erase_student(self, sid):
+        """Delete a student from the roster with all their evaluations."""
+        self.run("DELETE FROM mistakes WHERE student_id = ?", (sid,))
+        self.run("DELETE FROM evaluations WHERE student_id = ?", (sid,))
+        self.run("DELETE FROM students WHERE student_id = ?", (sid,))
+
+    def erase_batch(self, batch, roster_too=True):
+        """Delete all evaluations of a batch's students (and the students themselves if roster_too)."""
+        sub = "SELECT student_id FROM students WHERE batch = ?"
+        self.run(f"DELETE FROM mistakes WHERE student_id IN ({sub})", (batch,))
+        self.run(f"DELETE FROM evaluations WHERE student_id IN ({sub})", (batch,))
+        if roster_too:
+            self.run("DELETE FROM students WHERE batch = ?", (batch,))
+
+    def erase_unlisted(self):
+        """Delete evaluations of student IDs that are not on the roster."""
+        sub = "SELECT student_id FROM students"
+        self.run(f"DELETE FROM mistakes WHERE student_id NOT IN ({sub})")
+        self.run(f"DELETE FROM evaluations WHERE student_id NOT IN ({sub})")
+
+    def erase_all(self):
+        for t in ("mistakes", "evaluations", "students", "cases"):
+            self.run(f"DELETE FROM {t}")
+
     def size_mb(self):
         if self.kind == "pg":
             return self.rows("SELECT pg_database_size(current_database()) / 1048576.0 AS mb")[0]["mb"]
