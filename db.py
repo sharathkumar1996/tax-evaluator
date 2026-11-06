@@ -99,7 +99,9 @@ class DB:
             self.conn = sqlite3.connect(path, check_same_thread=False)
         else:
             import psycopg
-            self.conn = psycopg.connect(self.url, autocommit=True, connect_timeout=15)
+            # prepare_threshold=None: no server-side prepared statements, so Neon's pooled
+            # ("-pooler") and direct connection strings both work
+            self.conn = psycopg.connect(self.url, autocommit=True, connect_timeout=15, prepare_threshold=None)
 
     def _sql(self, sql):
         return sql if self.kind == "sqlite" else sql.replace("?", "%s")
