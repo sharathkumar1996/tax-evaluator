@@ -131,17 +131,33 @@ class DB:
             if path != ":memory:":
                 self._conn.execute("PRAGMA journal_mode = WAL")
             return
-        kwargs = {"autocommit": True, "prepare_threshold": None, "connect_timeout": 15}
+        import psycopg
+        kwargs = {"autocommit": True, "prepare_threshold": None, "connect_timeout": 20}
         # prepare_threshold=None: no server-side prepared statements, so Neon's pooled
-        # ("-pooler") and direct connection strings both work
+        # ("-pooler") and direct connection strings both work.
+        # 1) Connect once directly. A wrong password/host then shows its real error message
+        #    (a pool would only say "couldn't get a connection"). Retried once: a Neon compute
+        #    that was asleep can take a few seconds to wake up.
+        for attempt in (1, 2):
+            try:
+                self._conn = psycopg.connect(self.url, **kwargs)
+                break
+            except psycopg.OperationalError:
+                if attempt == 2:
+                    raise
+                time.sleep(3)
+        # 2) Hand over to a pool; if the pool cannot start, keep the working single connection.
         try:
             from psycopg_pool import ConnectionPool
-            self._pool = ConnectionPool(self.url, min_size=1, max_size=self.pool_size, kwargs=kwargs, timeout=30,
-                                        max_idle=240, check=ConnectionPool.check_connection, open=True,
-                                        name="tax-evaluator")
-        except ImportError:                    # pool package missing: one connection, used under a lock
-            import psycopg
-            self._conn = psycopg.connect(self.url, **kwargs)
+            pool = ConnectionPool(self.url, min_size=1, max_size=self.pool_size, kwargs=kwargs, timeout=30,
+                                  max_idle=240, check=ConnectionPool.check_connection, open=False,
+                                  name="tax-evaluator")
+            pool.open(wait=True, timeout=30)
+        except Exception as e:                 # ImportError, PoolTimeout ...
+            log.warning("connection pool not used (%s: %s); using one shared connection", type(e).__name__, e)
+            return
+        self._conn.close()
+        self._conn, self._pool = None, pool
 
     def _reconnect(self):
         if self._pool is not None:
