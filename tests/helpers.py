@@ -28,10 +28,12 @@ def _short(a):
     return re.sub(r"\[\d+\]$", "", names[0]) if names else ""
 
 
-def fill(blank: bytes, text=None, checks=None, flatten=False) -> bytes:
-    """text: {short field name: value}; checks: {short field name: kid index to tick (0-based)}."""
+def fill(blank: bytes, text=None, checks=None, flatten=False, incremental=False) -> bytes:
+    """text: {short field name: value}; checks: {short field name: kid index to tick (0-based)}.
+    incremental=True appends the changes to the file, as PDF viewers do when saving."""
     text, checks = text or {}, checks or {}
-    w = PdfWriter(clone_from=PdfReader(io.BytesIO(blank)))
+    w = (PdfWriter(io.BytesIO(blank), incremental=True) if incremental
+         else PdfWriter(clone_from=PdfReader(io.BytesIO(blank))))
     kid_no = {}
     for page in w.pages:
         for ref in page.get("/Annots", []):

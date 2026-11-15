@@ -95,6 +95,15 @@ MIGRATIONS = [
     (2, [("add_column", "evaluations", "source_format", "TEXT"),
          ("add_column", "evaluations", "reader_notes", "TEXT"),
          "CREATE INDEX IF NOT EXISTS ix_students_batch ON students (batch)"]),
+    # integrity checks: small anonymous fingerprints of each return (see integrity.py)
+    (3, ["""CREATE TABLE IF NOT EXISTS fingerprints (
+            student_id TEXT NOT NULL,
+            case_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            value TEXT NOT NULL,
+            detail TEXT,
+            PRIMARY KEY (student_id, case_id, kind, value))""",
+         "CREATE INDEX IF NOT EXISTS ix_fp_match ON fingerprints (case_id, kind, value)"]),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 TRANSIENT = ("OperationalError", "InterfaceError", "PoolTimeout", "ConnectionTimeout")
@@ -310,7 +319,8 @@ class DB:
     def evaluated(self, case_id):
         return {r["student_id"] for r in self.rows("SELECT student_id FROM evaluations WHERE case_id = ?", (case_id,))}
 
-    def save_evaluation(self, sid, case_id, file_name, m, rows, key_hash, by, source_format="", notes=""):
+    def save_evaluation(self, sid, case_id, file_name, m, rows, key_hash, by, source_format="", notes="",
+                        fingerprints=None):
         """m: metrics dict from metrics.return_metrics; rows: graded rows. Saved atomically."""
         keep = [r for r in rows if r["Result"] != "Correct" or r.get("Needs Review")]
         mistakes = [(sid, case_id, int(r["Step"]), r["Category"], str(r["Form"]), str(r["Line"]), r["Description"],
@@ -338,7 +348,30 @@ class DB:
                 c.executemany("""INSERT INTO mistakes (student_id, case_id, step, category, form, line, description,
                                  correct_value, student_value, marks, awarded, result, feedback, note, critical,
                                  needs_review) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", mistakes)
+            if fingerprints is not None:
+                self._write_fingerprints(c, sid, case_id, fingerprints)
         self.tx(write)
+
+    # ------------------------------------------------------------ integrity fingerprints
+    @staticmethod
+    def _write_fingerprints(c, sid, case_id, fps):
+        c.execute("DELETE FROM fingerprints WHERE student_id = ? AND case_id = ?", (sid, case_id))
+        rows = list({(k, str(v)[:200]): (sid, case_id, k, str(v)[:200], str(d or "")[:300])
+                     for k, v, d in fps}.values())
+        if rows:
+            c.executemany("INSERT INTO fingerprints (student_id, case_id, kind, value, detail) VALUES (?, ?, ?, ?, ?)",
+                          rows)
+
+    def save_fingerprints(self, sid, case_id, fps):
+        """Fingerprints without an evaluation (the trainer's correct return, sid = integrity.TRAINER)."""
+        self.tx(lambda c: self._write_fingerprints(c, sid, case_id, fps))
+
+    def fingerprints(self, case_ids=None):
+        sql = "SELECT student_id, case_id, kind, value, detail FROM fingerprints"
+        if case_ids:
+            marks = ", ".join("?" for _ in case_ids)
+            return self.rows(f"{sql} WHERE case_id IN ({marks})", tuple(case_ids))
+        return self.rows(sql)
 
     def evaluations(self, student_id=None):
         sql = """SELECT e.*, s.name, s.batch FROM evaluations e
@@ -360,6 +393,7 @@ class DB:
     def delete_evaluation(self, sid, case_id):
         def f(c):
             c.execute("DELETE FROM mistakes WHERE student_id = ? AND case_id = ?", (sid, case_id))
+            c.execute("DELETE FROM fingerprints WHERE student_id = ? AND case_id = ?", (sid, case_id))
             c.execute("DELETE FROM evaluations WHERE student_id = ? AND case_id = ?", (sid, case_id))
         self.tx(f)
 
@@ -374,8 +408,9 @@ class DB:
         return [r["batch"] for r in self.rows("SELECT DISTINCT batch FROM students ORDER BY batch")]
 
     def erase_case_results(self, case_id):
-        """Delete all evaluations of a case; keep the answer key."""
+        """Delete all evaluations of a case; keep the answer key (and the trainer's fingerprints)."""
         def f(c):
+            c.execute("DELETE FROM fingerprints WHERE case_id = ? AND student_id <> '#TRAINER'", (case_id,))
             c.execute("DELETE FROM mistakes WHERE case_id = ?", (case_id,))
             c.execute("DELETE FROM evaluations WHERE case_id = ?", (case_id,))
         self.tx(f)
@@ -383,6 +418,7 @@ class DB:
     def erase_case(self, case_id):
         """Delete a case's answer key and all its evaluations."""
         def f(c):
+            c.execute("DELETE FROM fingerprints WHERE case_id = ?", (case_id,))
             c.execute("DELETE FROM mistakes WHERE case_id = ?", (case_id,))
             c.execute("DELETE FROM evaluations WHERE case_id = ?", (case_id,))
             c.execute("DELETE FROM cases WHERE case_id = ?", (case_id,))
@@ -392,6 +428,7 @@ class DB:
         """Delete a student from the roster with all their evaluations."""
         def f(c):
             c.execute("DELETE FROM mistakes WHERE student_id = ?", (sid,))
+            c.execute("DELETE FROM fingerprints WHERE student_id = ?", (sid,))
             c.execute("DELETE FROM evaluations WHERE student_id = ?", (sid,))
             c.execute("DELETE FROM students WHERE student_id = ?", (sid,))
         self.tx(f)
@@ -402,6 +439,7 @@ class DB:
 
         def f(c):
             c.execute(f"DELETE FROM mistakes WHERE student_id IN ({sub})", (batch,))
+            c.execute(f"DELETE FROM fingerprints WHERE student_id IN ({sub})", (batch,))
             c.execute(f"DELETE FROM evaluations WHERE student_id IN ({sub})", (batch,))
             if roster_too:
                 c.execute("DELETE FROM students WHERE batch = ?", (batch,))
@@ -413,12 +451,13 @@ class DB:
 
         def f(c):
             c.execute(f"DELETE FROM mistakes WHERE student_id NOT IN ({sub})")
+            c.execute(f"DELETE FROM fingerprints WHERE student_id NOT IN ({sub}) AND student_id <> '#TRAINER'")
             c.execute(f"DELETE FROM evaluations WHERE student_id NOT IN ({sub})")
         self.tx(f)
 
     def erase_all(self):
         def f(c):
-            for t in ("mistakes", "evaluations", "students", "cases"):
+            for t in ("mistakes", "fingerprints", "evaluations", "students", "cases"):
                 c.execute(f"DELETE FROM {t}")
         self.tx(f)
 

@@ -22,6 +22,7 @@ import streamlit as st
 
 from bulk import group_uploads
 from grader_core import KeyError_, fmt, grade, load_key, summarise
+from integrity import TRAINER, analyse, fingerprints
 from irs_reader import ReaderError
 from make_keys import draft_from_return
 from metrics import (CRITICAL_TEXT, flag, group_table, headline, rebuild_rows, return_metrics, student_table,
@@ -171,8 +172,8 @@ with st.sidebar:
         st.download_button("Download blank answer-key template", tpl.read_bytes(), file_name="answer_key_template.xlsx")
 
 st.title("Tax Return Evaluator")
-t_eval, t_students, t_mgmt, t_find, t_build, t_data, t_help = st.tabs(
-    ["Evaluate returns", "Students & batches", "Management dashboard", "Find a report",
+t_eval, t_students, t_mgmt, t_integ, t_find, t_build, t_data, t_help = st.tabs(
+    ["Evaluate returns", "Students & batches", "Management dashboard", "Integrity checks", "Find a report",
      "Build a key from a correct return", "Data management", "How it works"])
 
 
@@ -186,7 +187,12 @@ def evaluate_files(files, sid, sname, key):
     label = files[0][0] if len(files) == 1 else f"{len(files)} files"
     report = build_report(sname, sid, key, rows, cats, total, out_of, label, institute,
                           status_line=status_line(m))
-    return {"rows": rows, "cats": cats, "m": m, "report": report, "pages": ret.page_map,
+    try:
+        fp = fingerprints(files, ret)
+    except Exception:              # integrity data must never stop a return from being marked
+        log.exception("fingerprinting failed for %s", sid)
+        fp = None
+    return {"fp": fp, "rows": rows, "cats": cats, "m": m, "report": report, "pages": ret.page_map,
             "forms": ret.forms_found(), "format": ret.format_name, "notes": list(ret.notes),
             "unlinked": ret.unlinked(), "file_label": ", ".join(n for n, _ in files)[:500]}
 
@@ -194,7 +200,7 @@ def evaluate_files(files, sid, sname, key):
 def save(sid, res):
     if db:
         db.save_evaluation(sid, ss.key.case_id, res["file_label"], res["m"], res["rows"], ss.key_hash, staff or "",
-                           source_format=res["format"], notes=" | ".join(res["notes"]))
+                           source_format=res["format"], notes=" | ".join(res["notes"]), fingerprints=res.get("fp"))
 
 
 def show_result(r):
@@ -515,6 +521,91 @@ with t_mgmt:
                 st.download_button("Download consolidated report (PDF)", ss.stud_pdf[1],
                                    file_name=f"Consolidated_report_{clean(pick)}.pdf", mime="application/pdf")
 
+# ------------------------------------------------------------------ integrity checks
+with t_integ:
+    if not db:
+        st.info("Integrity checks compare returns saved in the database, so they need the database.")
+    else:
+        from integrity_report import CAUTION, integrity_excel, integrity_pdf
+        st.subheader("Integrity checks - copying and shared files")
+        st.caption(CAUTION)
+        ev_all = db.evaluations()
+        if not ev_all:
+            st.info("No evaluations saved yet.")
+        else:
+            for e in ev_all:
+                e["batch"] = e.get("batch") or "Unassigned"
+            c1, c2 = st.columns(2)
+            ib = sorted({e["batch"] for e in ev_all})
+            ic = sorted({e["case_id"] for e in ev_all})
+            sel_ib = c1.multiselect("Batches", ib, default=ib, key="int_b")
+            sel_ic = c2.multiselect("Cases", ic, default=ic, key="int_c")
+            st.caption("Returns of the same case are compared across all the selected batches.")
+            if st.button("Run integrity check", type="primary", disabled=not sel_ib or not sel_ic):
+                with st.spinner("Comparing returns..."):
+                    evs = [e for e in ev_all if e["batch"] in sel_ib and e["case_id"] in sel_ic]
+                    ids = {e["student_id"] for e in evs}
+                    fps_ = db.fingerprints(sel_ic)
+                    mis = [m for m in db.mistakes() if m["case_id"] in sel_ic and m["student_id"] in ids]
+                    ss.integ = {"scope": f"Batches: {', '.join(sel_ib) if len(sel_ib) < len(ib) else 'all'} · "
+                                         f"Cases: {', '.join(sel_ic) if len(sel_ic) < len(ic) else 'all'}",
+                                "res": analyse(evs, fps_, mis, db.students())}
+            if ss.get("integ"):
+                res, scope = ss.integ["res"], ss.integ["scope"]
+                stu = res["students"]
+                cnt = lambda lv: int((stu["Integrity"] == lv).sum()) if not stu.empty else 0
+                m = st.columns(6)
+                m[0].metric("Students checked", len(stu))
+                m[1].metric("Very likely copied", cnt("Very likely copied"))
+                m[2].metric("Likely copied", cnt("Likely copied"))
+                m[3].metric("Review", cnt("Review"))
+                m[4].metric("Groups", len(res["groups"]))
+                m[5].metric("Built on trainer's file", len(res["trainer"]))
+                st.markdown("#### By batch")
+                st.dataframe(res["batches"], hide_index=True)
+                if not res["trainer"].empty:
+                    st.markdown("#### Returns built on the trainer's correct-return file")
+                    st.dataframe(res["trainer"], hide_index=True)
+                st.markdown("#### Groups of linked students")
+                st.dataframe(res["groups"], hide_index=True)
+                st.markdown("#### Flagged pairs")
+                lv_pick = st.multiselect("Show levels", ["Very likely copied", "Likely copied", "Review"],
+                                         default=["Very likely copied", "Likely copied", "Review"], key="int_lv")
+                pr = res["pairs"]
+                st.dataframe(pr[pr["Level"].isin(lv_pick)] if not pr.empty else pr, hide_index=True,
+                             column_config={"Evidence": st.column_config.TextColumn(width="large")})
+                st.markdown("#### Students")
+                only = st.checkbox("Only students with concerns", value=True, key="int_only")
+                st.dataframe(stu[stu["Integrity"] != "No concerns"] if only and not stu.empty else stu, hide_index=True)
+                if not res["id_checks"].empty:
+                    st.markdown("#### Student ID checks")
+                    st.dataframe(res["id_checks"], hide_index=True)
+                d1, d2 = st.columns(2)
+                if d1.button("Prepare integrity report (PDF)"):
+                    ss.integ_pdf = integrity_pdf(institute, scope, res)
+                if ss.get("integ_pdf"):
+                    d1.download_button("Download integrity report (PDF)", ss.integ_pdf, mime="application/pdf",
+                                       file_name=f"Integrity_report_{datetime.now():%Y%m%d}.pdf")
+                d2.download_button("Download integrity workbook (Excel)", integrity_excel(scope, res),
+                                   file_name=f"Integrity_report_{datetime.now():%Y%m%d}.xlsx")
+                with st.expander("What is checked"):
+                    st.markdown("""
+- **Same file**: exactly the same PDF, even renamed or uploaded under another student ID.
+- **Saved over another student's file**: PDF viewers add each save to the end of the file, so a file saved over
+  someone else's filled-in form still contains that student's version.
+- **Same save ID / document ID / time stamps**: hidden properties written when a PDF is saved or printed.
+- **Same computer user name** in the file properties (ATX printouts).
+- **Same unusual wrong answers**: the same wrong figure on the same line. Mistakes that many students make are
+  ignored; the rarer the shared mistake, the more it counts.
+- **Same typing habits**: 0 typed in the same boxes others leave blank; identical capitalisation and spacing;
+  every box identical.
+- **Built on the trainer's file**: the trainer's correct return (uploaded under *Build a key*) found inside a
+  student's file.
+
+Values every blank IRS form carries (its own author, dates and IDs) are ignored. Students re-evaluated after
+this update are fully covered; returns marked earlier only have their wrong answers compared.
+""")
+
 # ------------------------------------------------------------------ find a report
 with t_find:
     if not db:
@@ -571,10 +662,18 @@ with t_build:
     b4, b5 = st.columns(2)
     dmarks = b4.number_input("Default marks per item", 0.0, 100.0, 1.0, 0.5)
     dunx = b5.number_input("Marks deducted per unexpected entry", 0.0, 100.0, 1.0, 0.5)
+    if db:
+        st.caption("The trainer's file is also remembered for the integrity checks (a student file built on it is "
+                   "flagged). Use the same Case ID as the answer key.")
     if st.button("Build answer key", disabled=not good):
         try:
-            data, n, forms = draft_from_return([(f.name, f.getvalue()) for f in good], cid, ctitle, int(cyear),
-                                               dmarks, dunx)
+            gfiles = [(f.name, f.getvalue()) for f in good]
+            data, n, forms = draft_from_return(gfiles, cid, ctitle, int(cyear), dmarks, dunx)
+            if db and n:
+                try:
+                    db.save_fingerprints(TRAINER, str(cid).strip(), fingerprints(gfiles, read_return(gfiles)))
+                except Exception:
+                    log.exception("saving trainer fingerprints failed")
         except ReaderError as e:
             st.error(str(e))
         except Exception:
@@ -683,6 +782,9 @@ with t_help:
 
 **How marks are given**: any difference from the key loses that item's marks; amounts on lines that should be blank
 deduct the marks set in the key; a missing form makes all its items wrong; unreadable items are flagged for review.
+
+**Integrity checks**: compares every pair of returns of a case for copied or shared files, files saved over
+another student's work, the same unusual wrong answers and identical typing habits. See the tab for details.
 
 **Erasing data**: the **Data management** tab (admin password) erases a case's results, a whole case, a batch, a
 student, or everything.

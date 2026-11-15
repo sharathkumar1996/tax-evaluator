@@ -22,6 +22,7 @@ Nothing is stored on the server. The key, returns and results exist only in the 
 | `readers.py` | Chooses the reader for each return and checks file limits |
 | `irs_reader.py` | Reads IRS fillable forms (the values stored in the form's boxes) |
 | `grader_core.py` | Reads ATX PDFs (1040 + schedules/forms) and marks returns against the key |
+| `integrity.py`, `integrity_report.py` | Copying checks and the integrity report |
 | `bulk.py` | Groups a bulk upload (PDFs / zips) into one return per student, with zip safety limits |
 | `report_pdf.py` | Builds the student PDF report |
 | `db.py` | Saves students, batches, case keys, scores and mistakes (Neon Postgres) |
@@ -146,6 +147,34 @@ cannot link to a line is listed under **What the system read**, and you can mark
 Tested on the 2025 Form 1040 (every line, the filing status, the dependents table, check boxes and
 name/address boxes). For each other form you use (Schedules 1-3, C, SE ...), run one trainer
 return through the app and check **What the system read** before marking students.
+
+## Integrity checks (copying)
+The **Integrity checks** tab compares every pair of returns of the same case, across the selected batches,
+and explains in plain words what links them. Evidence it looks for:
+
+| Evidence | Points |
+|---|---|
+| Exactly the same PDF file (also when renamed or uploaded under another ID) | 100 |
+| One file contains another student's filled-in work (saved over their file: viewers append each save) | 100 |
+| Same PDF save ID (only when the viewer changed it after the blank form was downloaded) | 90 |
+| Same created + saved time stamps, to the second, and same software | 70 |
+| Same unusual wrong answers on the same lines (rarer mistakes count more; common ones are ignored) | up to 70 |
+| Same original document ID (ATX printouts) | 60 |
+| Every box identical, including how numbers and names were typed | 50 |
+| Same computer user name in the file properties (ATX printouts) | 25 |
+| 0 typed in the same boxes others leave blank / identical capitalisation and spacing | 15 each |
+| Saved within 2 minutes of each other | 10 |
+
+Score 90+ = **very likely copied**, 60+ = **likely**, 30+ = **review**. Students linked by "likely" or stronger are
+shown as groups. A student file built on the trainer's correct return (uploaded under **Build a key**, with the same
+Case ID) is listed separately. Values that every blank IRS form carries, or that most of the batch shares, are
+ignored. The tab also lists evaluated IDs that are not on the roster and one name used under several IDs.
+Summaries are batch-wise and student-wise, with a PDF and an Excel report.
+
+These are signals for a conversation, not proof: compare the two returns and hear the students before acting.
+Only returns evaluated with this version have file fingerprints; older results are compared on wrong answers only.
+What is stored: hashes, PDF save IDs and time stamps, the file name and, for ATX printouts, the computer user name
+in the file properties. The returns themselves are still not stored.
 
 ## Reliability
 - One reader per return format, behind one interface: marking, the database and all reports are shared.
