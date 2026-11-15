@@ -270,7 +270,10 @@ class FormCopy:
 
 
 class ReturnPDF:
+    format_name = "ATX printout"
+
     def __init__(self, data: bytes):
+        self.notes = []            # messages for staff (same interface as irs_reader.IRSReturn)
         self.copies = {}           # (form, instance) -> FormCopy
         self.page_map = []         # [(page_no, form label)]
         self.filing_status = None
@@ -301,6 +304,9 @@ class ReturnPDF:
 
     def forms_found(self):
         return sorted({f if i == 1 else f"{f} #{i}" for (f, i) in self.copies})
+
+    def unlinked(self):
+        return []
 
     # ---- dependents table on Form 1040 page 1
     def dependents(self):
@@ -726,7 +732,8 @@ def grade(ret: ReturnPDF, key: AnswerKey):
             f, inst = norm_form(fld["form"])
             k_ = (f, inst, norm_line(fld["line"]))
             ln_ = norm_line(fld["line"])
-            if k_ in keyed or ln_.startswith("dep") or ln_ in F1040_FIELDS or ln_ == "fs":
+            if (k_ in keyed or ln_.startswith("dep") or ln_ in F1040_FIELDS or ln_ == "fs"
+                    or fld.get("unlinked")):
                 continue            # only amounts on numbered lines count as unexpected entries
             v = fld["value"]
             if v in ("", 0, 0.0, None, "Unchecked"):
@@ -734,7 +741,8 @@ def grade(ret: ReturnPDF, key: AnswerKey):
             n += 1
             rows.append({
                 "Step": n, "Category": "Unexpected entries", "Form": fld["form"], "Line": fld["line"],
-                "Description": describe(fld["form"], fld["line"], f"{fld['form']} line {fld['line']}"),
+                "Description": (fld["desc"] if fld.get("prefer_desc") and fld.get("desc") else
+                                describe(fld["form"], fld["line"], f"{fld['form']} line {fld['line']}")),
                 "Correct Value": "", "Student Value": v, "Marks": 0.0, "Awarded": -float(key.unexpected_marks),
                 "Result": "Unexpected entry",
                 "Feedback": "This line should be blank for this case. Remove the entry and check where it came from.",

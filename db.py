@@ -2,9 +2,22 @@
 db.py - permanent storage for students, cases (answer keys), evaluations and mistakes.
 
 * Production: PostgreSQL (Neon). Set `database_url` in Streamlit Secrets, e.g.
-  database_url = "postgresql://user:password@ep-xxx.neon.tech/neondb?sslmode=require"
+  database_url = "postgresql://user:password@ep-xxx-pooler.neon.tech/neondb?sslmode=require"
 * Testing / laptop: a local SQLite file is used when database_url starts with "sqlite:///".
 * If no database_url is set the app still works, but nothing is saved after the tab closes.
+
+Design
+------
+* Every multi-statement change (saving an evaluation, erasing a batch ...) runs in ONE transaction:
+  it is saved completely or not at all - never half-written.
+* Connections come from a small pool (psycopg_pool), so several staff members can work at the
+  same time without sharing one connection. Each connection is checked before use, which
+  handles Neon closing idle connections when it scales to zero.
+* A transaction that fails because the connection dropped is retried (up to 3 times, with a
+  short wait). All writes are upserts or deletes, so retrying them is safe.
+* The schema is versioned (table `schema_version`). Upgrades only ADD tables, columns and
+  indexes, so an older copy of the app can keep using the same database. Upgrades take a
+  database lock, so two app instances starting together cannot run them twice.
 
 To keep the database small, only the items a student got wrong (plus unexpected entries
 and unreadable items) are stored. Correct items are rebuilt from the case's answer key
@@ -12,10 +25,16 @@ when a report is regenerated.
 """
 import base64
 import hashlib
+import logging
 import sqlite3
+import threading
+import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
-SCHEMA = [
+log = logging.getLogger("tax_evaluator.db")
+
+BASE_SCHEMA = [
     """CREATE TABLE IF NOT EXISTS students (
         student_id TEXT PRIMARY KEY,
         name TEXT,
@@ -70,6 +89,16 @@ SCHEMA = [
     "CREATE INDEX IF NOT EXISTS ix_mistakes_case ON mistakes (case_id)",
 ]
 
+# (version, [statements]) - append only. Column additions use ("add_column", table, column, type).
+MIGRATIONS = [
+    (1, BASE_SCHEMA),
+    (2, [("add_column", "evaluations", "source_format", "TEXT"),
+         ("add_column", "evaluations", "reader_notes", "TEXT"),
+         "CREATE INDEX IF NOT EXISTS ix_students_batch ON students (batch)"]),
+]
+SCHEMA_VERSION = MIGRATIONS[-1][0]
+TRANSIENT = ("OperationalError", "InterfaceError", "PoolTimeout", "ConnectionTimeout")
+
 
 def now():
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -84,61 +113,144 @@ def _to_text(v):
 
 
 class DB:
-    def __init__(self, url):
+    def __init__(self, url, pool_size=5):
         self.url = url
         self.kind = "sqlite" if url.startswith("sqlite") else "pg"
-        self.conn = None
-        self._connect()
-        for s in SCHEMA:
-            self.run(s)
+        self._lock = threading.RLock()       # guards the single connection when there is no pool
+        self._pool, self._conn = None, None
+        self.pool_size = pool_size
+        self._open()
+        self._migrate()
 
-    # ------------------------------------------------------------ plumbing
-    def _connect(self):
+    # ------------------------------------------------------------ connections
+    def _open(self):
         if self.kind == "sqlite":
             path = self.url.split("sqlite:///", 1)[1] or ":memory:"
-            self.conn = sqlite3.connect(path, check_same_thread=False)
-        else:
+            self._conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None, timeout=30)
+            self._conn.execute("PRAGMA foreign_keys = ON")
+            if path != ":memory:":
+                self._conn.execute("PRAGMA journal_mode = WAL")
+            return
+        kwargs = {"autocommit": True, "prepare_threshold": None, "connect_timeout": 15}
+        # prepare_threshold=None: no server-side prepared statements, so Neon's pooled
+        # ("-pooler") and direct connection strings both work
+        try:
+            from psycopg_pool import ConnectionPool
+            self._pool = ConnectionPool(self.url, min_size=1, max_size=self.pool_size, kwargs=kwargs, timeout=30,
+                                        max_idle=240, check=ConnectionPool.check_connection, open=True,
+                                        name="tax-evaluator")
+        except ImportError:                    # pool package missing: one connection, used under a lock
             import psycopg
-            # prepare_threshold=None: no server-side prepared statements, so Neon's pooled
-            # ("-pooler") and direct connection strings both work
-            self.conn = psycopg.connect(self.url, autocommit=True, connect_timeout=15, prepare_threshold=None)
+            self._conn = psycopg.connect(self.url, **kwargs)
+
+    def _reconnect(self):
+        if self._pool is not None:
+            return                              # the pool checks and replaces broken connections itself
+        try:
+            self._conn.close()
+        except Exception:
+            pass
+        self._open()
+
+    @contextmanager
+    def _transaction(self):
+        """Yield a cursor inside one transaction: committed on success, rolled back on any error."""
+        if self._pool is not None:
+            with self._pool.connection() as conn:
+                with conn.transaction():
+                    yield conn.cursor()
+            return
+        with self._lock:
+            if self.kind == "pg":
+                with self._conn.transaction():
+                    yield self._conn.cursor()
+            else:
+                cur = self._conn.cursor()
+                cur.execute("BEGIN IMMEDIATE")
+                try:
+                    yield cur
+                except BaseException:
+                    cur.execute("ROLLBACK")
+                    raise
+                cur.execute("COMMIT")
 
     def _sql(self, sql):
         return sql if self.kind == "sqlite" else sql.replace("?", "%s")
 
-    def _exec(self, fn):
-        """Run fn(cursor); reconnect once if the server closed an idle connection (Neon scales to zero)."""
-        for attempt in (1, 2):
+    def tx(self, fn, retries=3):
+        """Run fn(cursor_wrapper) in one transaction, retrying the WHOLE unit if the connection dropped."""
+        delay = 0.5
+        for attempt in range(1, retries + 1):
             try:
-                cur = self.conn.cursor()
-                out = fn(cur)
-                if self.kind == "sqlite":
-                    self.conn.commit()
-                return out
+                with self._transaction() as cur:
+                    return fn(_Cursor(cur, self._sql))
             except Exception as e:
-                name = type(e).__name__
-                if attempt == 1 and self.kind == "pg" and name in ("OperationalError", "InterfaceError"):
-                    try:
-                        self.conn.close()
-                    except Exception:
-                        pass
-                    self._connect()
+                if attempt < retries and self.kind == "pg" and type(e).__name__ in TRANSIENT:
+                    log.warning("database connection problem (%s), retry %d", type(e).__name__, attempt)
+                    time.sleep(delay)
+                    delay *= 3
+                    self._reconnect()
                     continue
                 raise
 
+    # convenience wrappers (each call is its own transaction)
     def run(self, sql, params=()):
-        self._exec(lambda c: c.execute(self._sql(sql), params))
+        self.tx(lambda c: c.execute(sql, params))
 
     def many(self, sql, rows):
         if rows:
-            self._exec(lambda c: c.executemany(self._sql(sql), rows))
+            self.tx(lambda c: c.executemany(sql, rows))
 
     def rows(self, sql, params=()):
-        def f(c):
-            c.execute(self._sql(sql), params)
-            cols = [d[0] for d in c.description]
-            return [dict(zip(cols, r)) for r in c.fetchall()]
-        return self._exec(f)
+        return self.tx(lambda c: c.fetch(sql, params))
+
+    def close(self):
+        try:
+            if self._pool is not None:
+                self._pool.close()
+            elif self._conn is not None:
+                self._conn.close()
+        except Exception:
+            pass
+
+    def health(self):
+        """True if the database answers a trivial query."""
+        try:
+            return self.rows("SELECT 1 AS ok")[0]["ok"] == 1
+        except Exception as e:
+            log.warning("health check failed: %s", e)
+            return False
+
+    # ------------------------------------------------------------ schema upgrades
+    def _columns(self, c, table):
+        if self.kind == "sqlite":
+            return {r["name"] for r in c.fetch(f"PRAGMA table_info({table})")}
+        return {r["column_name"] for r in c.fetch(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = ?", (table,))}
+
+    def _migrate(self):
+        def up(c):
+            if self.kind == "pg":
+                c.execute("SELECT pg_advisory_xact_lock(724501)")     # one upgrader at a time
+            c.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)")
+            r = c.fetch("SELECT MAX(version) AS v FROM schema_version")
+            current = (r[0]["v"] if r else None) or 0
+            for version, steps in MIGRATIONS:
+                if version <= current:
+                    continue
+                for s in steps:
+                    if isinstance(s, tuple) and s[0] == "add_column":
+                        _, table, col, typ = s
+                        if col not in self._columns(c, table):
+                            c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+                    else:
+                        c.execute(s)
+                c.execute("INSERT INTO schema_version (version) VALUES (?)", (version,))
+                log.info("database schema upgraded to version %d", version)
+        self.tx(up)
+
+    def schema_version(self):
+        return self.rows("SELECT MAX(version) AS v FROM schema_version")[0]["v"]
 
     # ------------------------------------------------------------ students
     def upsert_students(self, recs):
@@ -182,34 +294,42 @@ class DB:
     def evaluated(self, case_id):
         return {r["student_id"] for r in self.rows("SELECT student_id FROM evaluations WHERE case_id = ?", (case_id,))}
 
-    def save_evaluation(self, sid, case_id, file_name, m, rows, key_hash, by):
-        """m: metrics dict from metrics.return_metrics; rows: graded rows."""
-        self.run("""INSERT INTO evaluations (student_id, case_id, file_name, score, out_of, pct, file_ready, bottom_line,
-                    errors, critical_errors, unexpected, needs_review, key_hash, evaluated_at, evaluated_by)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT (student_id, case_id) DO UPDATE SET file_name = excluded.file_name, score = excluded.score,
-                    out_of = excluded.out_of, pct = excluded.pct, file_ready = excluded.file_ready,
-                    bottom_line = excluded.bottom_line, errors = excluded.errors,
-                    critical_errors = excluded.critical_errors, unexpected = excluded.unexpected,
-                    needs_review = excluded.needs_review, key_hash = excluded.key_hash,
-                    evaluated_at = excluded.evaluated_at, evaluated_by = excluded.evaluated_by""",
-                 (sid, case_id, file_name, m["score"], m["out_of"], m["pct"], int(m["file_ready"]),
-                  None if m["bottom_line"] is None else int(m["bottom_line"]), m["errors"], m["critical_errors"],
-                  m["unexpected"], m["needs_review"], key_hash, now(), by))
-        self.run("DELETE FROM mistakes WHERE student_id = ? AND case_id = ?", (sid, case_id))
+    def save_evaluation(self, sid, case_id, file_name, m, rows, key_hash, by, source_format="", notes=""):
+        """m: metrics dict from metrics.return_metrics; rows: graded rows. Saved atomically."""
         keep = [r for r in rows if r["Result"] != "Correct" or r.get("Needs Review")]
-        self.many("""INSERT INTO mistakes (student_id, case_id, step, category, form, line, description, correct_value,
-                     student_value, marks, awarded, result, feedback, note, critical, needs_review)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                  [(sid, case_id, int(r["Step"]), r["Category"], str(r["Form"]), str(r["Line"]), r["Description"],
-                    _to_text(r["Correct Value"]), _to_text(r["Student Value"]), r["Marks"], r["Awarded"], r["Result"],
-                    r["Feedback"], r.get("Note", ""), int(bool(r.get("Critical"))), int(bool(r.get("Needs Review"))))
-                   for r in keep])
+        mistakes = [(sid, case_id, int(r["Step"]), r["Category"], str(r["Form"]), str(r["Line"]), r["Description"],
+                     _to_text(r["Correct Value"]), _to_text(r["Student Value"]), r["Marks"], r["Awarded"], r["Result"],
+                     r["Feedback"], r.get("Note", ""), int(bool(r.get("Critical"))), int(bool(r.get("Needs Review"))))
+                    for r in keep]
 
-    def evaluations(self):
-        return self.rows("""SELECT e.*, s.name, s.batch FROM evaluations e
-                            LEFT JOIN students s ON s.student_id = e.student_id
-                            ORDER BY e.case_id, e.student_id""")
+        def write(c):
+            c.execute("""INSERT INTO evaluations (student_id, case_id, file_name, score, out_of, pct, file_ready, bottom_line,
+                        errors, critical_errors, unexpected, needs_review, key_hash, evaluated_at, evaluated_by,
+                        source_format, reader_notes)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT (student_id, case_id) DO UPDATE SET file_name = excluded.file_name, score = excluded.score,
+                        out_of = excluded.out_of, pct = excluded.pct, file_ready = excluded.file_ready,
+                        bottom_line = excluded.bottom_line, errors = excluded.errors,
+                        critical_errors = excluded.critical_errors, unexpected = excluded.unexpected,
+                        needs_review = excluded.needs_review, key_hash = excluded.key_hash,
+                        evaluated_at = excluded.evaluated_at, evaluated_by = excluded.evaluated_by,
+                        source_format = excluded.source_format, reader_notes = excluded.reader_notes""",
+                      (sid, case_id, file_name[:500], m["score"], m["out_of"], m["pct"], int(m["file_ready"]),
+                       None if m["bottom_line"] is None else int(m["bottom_line"]), m["errors"], m["critical_errors"],
+                       m["unexpected"], m["needs_review"], key_hash, now(), by, source_format, (notes or "")[:2000]))
+            c.execute("DELETE FROM mistakes WHERE student_id = ? AND case_id = ?", (sid, case_id))
+            if mistakes:
+                c.executemany("""INSERT INTO mistakes (student_id, case_id, step, category, form, line, description,
+                                 correct_value, student_value, marks, awarded, result, feedback, note, critical,
+                                 needs_review) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", mistakes)
+        self.tx(write)
+
+    def evaluations(self, student_id=None):
+        sql = """SELECT e.*, s.name, s.batch FROM evaluations e
+                 LEFT JOIN students s ON s.student_id = e.student_id"""
+        if student_id:
+            return self.rows(sql + " WHERE e.student_id = ? ORDER BY e.case_id", (student_id,))
+        return self.rows(sql + " ORDER BY e.case_id, e.student_id")
 
     def mistakes(self, sid=None, case_id=None):
         sql, p = "SELECT * FROM mistakes WHERE 1 = 1", []
@@ -222,55 +342,92 @@ class DB:
         return self.rows(sql + " ORDER BY case_id, step", tuple(p))
 
     def delete_evaluation(self, sid, case_id):
-        self.run("DELETE FROM mistakes WHERE student_id = ? AND case_id = ?", (sid, case_id))
-        self.run("DELETE FROM evaluations WHERE student_id = ? AND case_id = ?", (sid, case_id))
+        def f(c):
+            c.execute("DELETE FROM mistakes WHERE student_id = ? AND case_id = ?", (sid, case_id))
+            c.execute("DELETE FROM evaluations WHERE student_id = ? AND case_id = ?", (sid, case_id))
+        self.tx(f)
 
-    # ------------------------------------------------------------ erasing data
+    # ------------------------------------------------------------ erasing data (each one atomic)
     def counts(self):
-        out = {}
-        for t in ("students", "cases", "evaluations", "mistakes"):
-            out[t] = self.rows(f"SELECT COUNT(*) AS n FROM {t}")[0]["n"]
-        return out
+        def f(c):
+            return {t: c.fetch(f"SELECT COUNT(*) AS n FROM {t}")[0]["n"]
+                    for t in ("students", "cases", "evaluations", "mistakes")}
+        return self.tx(f)
 
     def batches(self):
         return [r["batch"] for r in self.rows("SELECT DISTINCT batch FROM students ORDER BY batch")]
 
     def erase_case_results(self, case_id):
         """Delete all evaluations of a case; keep the answer key."""
-        self.run("DELETE FROM mistakes WHERE case_id = ?", (case_id,))
-        self.run("DELETE FROM evaluations WHERE case_id = ?", (case_id,))
+        def f(c):
+            c.execute("DELETE FROM mistakes WHERE case_id = ?", (case_id,))
+            c.execute("DELETE FROM evaluations WHERE case_id = ?", (case_id,))
+        self.tx(f)
 
     def erase_case(self, case_id):
         """Delete a case's answer key and all its evaluations."""
-        self.erase_case_results(case_id)
-        self.run("DELETE FROM cases WHERE case_id = ?", (case_id,))
+        def f(c):
+            c.execute("DELETE FROM mistakes WHERE case_id = ?", (case_id,))
+            c.execute("DELETE FROM evaluations WHERE case_id = ?", (case_id,))
+            c.execute("DELETE FROM cases WHERE case_id = ?", (case_id,))
+        self.tx(f)
 
     def erase_student(self, sid):
         """Delete a student from the roster with all their evaluations."""
-        self.run("DELETE FROM mistakes WHERE student_id = ?", (sid,))
-        self.run("DELETE FROM evaluations WHERE student_id = ?", (sid,))
-        self.run("DELETE FROM students WHERE student_id = ?", (sid,))
+        def f(c):
+            c.execute("DELETE FROM mistakes WHERE student_id = ?", (sid,))
+            c.execute("DELETE FROM evaluations WHERE student_id = ?", (sid,))
+            c.execute("DELETE FROM students WHERE student_id = ?", (sid,))
+        self.tx(f)
 
     def erase_batch(self, batch, roster_too=True):
         """Delete all evaluations of a batch's students (and the students themselves if roster_too)."""
         sub = "SELECT student_id FROM students WHERE batch = ?"
-        self.run(f"DELETE FROM mistakes WHERE student_id IN ({sub})", (batch,))
-        self.run(f"DELETE FROM evaluations WHERE student_id IN ({sub})", (batch,))
-        if roster_too:
-            self.run("DELETE FROM students WHERE batch = ?", (batch,))
+
+        def f(c):
+            c.execute(f"DELETE FROM mistakes WHERE student_id IN ({sub})", (batch,))
+            c.execute(f"DELETE FROM evaluations WHERE student_id IN ({sub})", (batch,))
+            if roster_too:
+                c.execute("DELETE FROM students WHERE batch = ?", (batch,))
+        self.tx(f)
 
     def erase_unlisted(self):
         """Delete evaluations of student IDs that are not on the roster."""
         sub = "SELECT student_id FROM students"
-        self.run(f"DELETE FROM mistakes WHERE student_id NOT IN ({sub})")
-        self.run(f"DELETE FROM evaluations WHERE student_id NOT IN ({sub})")
+
+        def f(c):
+            c.execute(f"DELETE FROM mistakes WHERE student_id NOT IN ({sub})")
+            c.execute(f"DELETE FROM evaluations WHERE student_id NOT IN ({sub})")
+        self.tx(f)
 
     def erase_all(self):
-        for t in ("mistakes", "evaluations", "students", "cases"):
-            self.run(f"DELETE FROM {t}")
+        def f(c):
+            for t in ("mistakes", "evaluations", "students", "cases"):
+                c.execute(f"DELETE FROM {t}")
+        self.tx(f)
 
     def size_mb(self):
         if self.kind == "pg":
             return self.rows("SELECT pg_database_size(current_database()) / 1048576.0 AS mb")[0]["mb"]
         r = self.rows("SELECT page_count * page_size / 1048576.0 AS mb FROM pragma_page_count(), pragma_page_size()")
         return r[0]["mb"]
+
+
+class _Cursor:
+    """Small wrapper: '?' placeholders on both databases, rows as dicts."""
+
+    def __init__(self, cur, sql):
+        self._c, self._sql = cur, sql
+
+    def execute(self, sql, params=()):
+        self._c.execute(self._sql(sql), params)
+
+    def executemany(self, sql, rows):
+        self._c.executemany(self._sql(sql), rows)
+
+    def fetch(self, sql, params=()):
+        self._c.execute(self._sql(sql), params)
+        if self._c.description is None:
+            return []
+        cols = [d[0] for d in self._c.description]
+        return [dict(zip(cols, r)) for r in self._c.fetchall()]

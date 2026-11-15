@@ -2,12 +2,16 @@
 Tax Return Evaluator - Streamlit app.
 
 * Evaluate one return or many at once (several PDFs or a zip), each against the case answer key.
+* Returns can be ATX printouts or IRS fillable forms (one PDF per form); the right reader is
+  chosen automatically for each student (see readers.py).
 * With a database (Neon Postgres) every evaluation is saved: students and batches, case keys,
   scores and mistakes. Management reports and any student's report can be produced at any time.
 * Without a database the app still works; results then last only while the browser tab is open.
 """
 import hashlib
+import hmac
 import io
+import logging
 import re
 import zipfile
 from datetime import datetime
@@ -16,15 +20,19 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from grader_core import KeyError_, ReturnPDF, fmt, grade, load_key, summarise
+from bulk import group_uploads
+from grader_core import KeyError_, fmt, grade, load_key, summarise
+from irs_reader import ReaderError
 from make_keys import draft_from_return
 from metrics import (CRITICAL_TEXT, flag, group_table, headline, rebuild_rows, return_metrics, student_table,
                      top_mistakes)
+from readers import read_return
 from report_pdf import build_report
 
 st.set_page_config(page_title="Tax Return Evaluator", page_icon="📝", layout="wide")
 HERE = Path(__file__).parent
-FNAME = re.compile(r"^([A-Za-z0-9-]+)_([A-Za-z0-9-]+)\.pdf$", re.I)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+log = logging.getLogger("tax_evaluator.app")
 
 
 def secret(name, default=None):
@@ -55,7 +63,7 @@ if PASSWORD and not st.session_state.get("authed"):
     st.title("Tax Return Evaluator")
     pw = st.text_input("Staff password", type="password")
     if st.button("Sign in"):
-        if pw == PASSWORD:
+        if hmac.compare_digest(pw.encode(), str(PASSWORD).encode()):
             st.session_state.authed = True
             st.rerun()
         else:
@@ -168,22 +176,25 @@ t_eval, t_students, t_mgmt, t_find, t_build, t_data, t_help = st.tabs(
      "Build a key from a correct return", "Data management", "How it works"])
 
 
-def evaluate_pdf(data, file_name, sid, sname, key):
-    """Grade one PDF; returns dict with rows, metrics and the PDF report (or raises)."""
-    ret = ReturnPDF(data)
-    if not ret.copies:
-        raise ValueError("No IRS form pages recognised - is this the complete return printed to PDF from ATX?")
+def evaluate_files(files, sid, sname, key):
+    """Read and grade one student's return (one or more PDFs); returns rows, metrics and the PDF report.
+    Raises ReaderError with a message the user can act on."""
+    ret = read_return(files)
     rows = flag(grade(ret, key))
     m = return_metrics(rows)
     cats, total, out_of = summarise(rows)
-    report = build_report(sname, sid, key, rows, cats, total, out_of, file_name, institute,
+    label = files[0][0] if len(files) == 1 else f"{len(files)} files"
+    report = build_report(sname, sid, key, rows, cats, total, out_of, label, institute,
                           status_line=status_line(m))
-    return {"rows": rows, "cats": cats, "m": m, "report": report, "pages": ret.page_map, "forms": ret.forms_found()}
+    return {"rows": rows, "cats": cats, "m": m, "report": report, "pages": ret.page_map,
+            "forms": ret.forms_found(), "format": ret.format_name, "notes": list(ret.notes),
+            "unlinked": ret.unlinked(), "file_label": ", ".join(n for n, _ in files)[:500]}
 
 
-def save(sid, file_name, res):
+def save(sid, res):
     if db:
-        db.save_evaluation(sid, ss.key.case_id, file_name, res["m"], res["rows"], ss.key_hash, staff or "")
+        db.save_evaluation(sid, ss.key.case_id, res["file_label"], res["m"], res["rows"], ss.key_hash, staff or "",
+                           source_format=res["format"], notes=" | ".join(res["notes"]))
 
 
 def show_result(r):
@@ -217,9 +228,16 @@ def show_result(r):
             "Correct": blank(x["Correct Value"]), "Marks lost": x["Marks"] - x["Awarded"],
             "Feedback": (x["Feedback"] + (f" [{x['Note']}]" if x["Note"] else "")).strip()} for x in wrong]),
             hide_index=True, column_config={"Feedback": st.column_config.TextColumn(width="large")})
+    for n in r.get("notes", []):
+        st.warning(n)
     with st.expander("What the system read (for staff checks)"):
-        st.write("**Forms recognised:** " + ", ".join(r["forms"]))
+        st.write(f"**Read as:** {r.get('format', '')}  \n**Forms recognised:** " + ", ".join(r["forms"]))
         st.dataframe(pd.DataFrame(r["pages"], columns=["PDF page", "Recognised as"]), hide_index=True)
+        if r.get("unlinked"):
+            st.write("**Filled-in boxes not linked to a line** (not marked; use `field: <name>` in the key "
+                     "to mark one):")
+            st.dataframe(pd.DataFrame([{"Form": x["form"], "Key line": x["line"], "Value": fmt(x["value"]),
+                                        "Box": x["desc"]} for x in r["unlinked"]]), hide_index=True)
 
 
 # ------------------------------------------------------------------ evaluate
@@ -232,11 +250,12 @@ with t_eval:
         mode = st.radio("How many returns?", ["One return", "Many returns at once (bulk)"], horizontal=True)
 
         if mode == "One return":
-            pdf = st.file_uploader("Student return printed from ATX (complete return, PDF)", type=["pdf"],
-                                   key=f"ret{ss.uploader_n}")
+            pdfs = st.file_uploader("Student return: the complete ATX printout, or the filled-in IRS fillable "
+                                    "forms (select all of them - one PDF per form is fine)", type=["pdf"],
+                                    accept_multiple_files=True, key=f"ret{ss.uploader_n}")
             guess = ""
-            if pdf is not None:
-                mt = re.match(r"^([A-Za-z0-9-]+)_", pdf.name)
+            if pdfs:
+                mt = re.match(r"^([A-Za-z0-9-]+)_", pdfs[0].name)
                 guess = mt.group(1).upper() if mt else ""
             c1, c2 = st.columns(2)
             sid = c2.text_input("Student ID", value=guess, key=f"sid{ss.uploader_n}").strip().upper()
@@ -245,21 +264,38 @@ with t_eval:
             if db and sid and not known:
                 st.caption("This student ID is not on the roster yet - add it under 'Students & batches' so it "
                            "appears in batch reports.")
-            if st.button("Evaluate", type="primary", disabled=pdf is None or not sid):
+            if sid and not re.fullmatch(r"[A-Z0-9-]{1,40}", sid):
+                st.error("Student ID may only contain letters, digits and '-' (up to 40 characters).")
+                sid = ""
+            if st.button("Evaluate", type="primary", disabled=not pdfs or not sid):
                 with st.spinner("Reading the return and marking it..."):
+                    files = [(f.name, f.getvalue()) for f in pdfs]
                     try:
-                        res = evaluate_pdf(pdf.getvalue(), pdf.name, sid, sname, k)
-                    except Exception as e:
+                        res = evaluate_files(files, sid, sname, k)
+                    except ReaderError as e:
                         st.error(str(e))
                         st.stop()
-                    save(sid, pdf.name, res)
-                    rec = {"Student ID": sid, "Student Name": sname or "-", "Case": k.case_id, "File": pdf.name,
+                    except Exception:
+                        log.exception("evaluation failed for %s", sid)
+                        st.error("Something went wrong while reading this return. The details were logged; "
+                                 "please check the files and try again.")
+                        st.stop()
+                    saved = False
+                    try:
+                        save(sid, res)
+                        saved = True
+                    except Exception:
+                        log.exception("saving failed for %s", sid)
+                        st.error("The return was marked but could NOT be saved to the database. Download the "
+                                 "report below, then try again later.")
+                    rec = {"Student ID": sid, "Student Name": sname or "-", "Case": k.case_id, "File": res["file_label"],
                            "Score": res["m"]["score"], "Out of": res["m"]["out_of"], "Percent": res["m"]["pct"] * 100,
                            "File-ready": res["m"]["file_ready"], "Errors": res["m"]["errors"],
                            "Evaluated": datetime.now().strftime("%d-%b %H:%M"), **res}
                     ss.results.append(rec)
+                    ss.results = ss.results[-200:]          # keep the session's memory bounded
                     ss.last = rec
-                if db:
+                if db and saved:
                     st.toast("Saved to the database", icon="✅")
             r = ss.last
             if r and r["Case"] == k.case_id:
@@ -271,61 +307,56 @@ with t_eval:
                     st.rerun()
 
         else:
-            st.write("Upload many PDFs at once, or one zip file containing them. Each file must be named "
-                     "`StudentID_CaseID.pdf` (e.g. `S0123_" + k.case_id + ".pdf`). Files for another case are skipped.")
-            files = st.file_uploader("Returns (PDFs or a zip)", type=["pdf", "zip"], accept_multiple_files=True,
+            st.write("Upload many PDFs at once, or zip files containing them. Name each student's file(s) "
+                     "`StudentID_CaseID.pdf` (e.g. `S0123_" + k.case_id + ".pdf`). For IRS fillable forms, a student "
+                     "can have several PDFs: `S0123_" + k.case_id + "_1040.pdf`, `S0123_" + k.case_id + "_SchC.pdf`, "
+                     "or a folder `S0123_" + k.case_id + "` holding them. Files for another case are skipped.")
+            files = st.file_uploader("Returns (PDFs or zips)", type=["pdf", "zip"], accept_multiple_files=True,
                                      key=f"bulk{ss.uploader_n}")
             c1, c2 = st.columns(2)
             skip_done = c1.checkbox("Skip students already evaluated for this case", value=bool(db), disabled=not db,
                                     help="Lets you restart an interrupted upload without marking anything twice.")
             make_reports = c2.checkbox("Also create the PDF report for every student", value=True)
             if st.button("Evaluate all", type="primary", disabled=not files):
-                def items():
-                    for f in files:
-                        if f.name.lower().endswith(".zip"):
-                            with zipfile.ZipFile(io.BytesIO(f.getvalue())) as z:
-                                for n in z.namelist():
-                                    base = n.split("/")[-1]
-                                    if base.lower().endswith(".pdf") and not n.startswith("__MACOSX"):
-                                        yield base, z.read(n)
-                        else:
-                            yield f.name, f.getvalue()
-                todo = list(items())
+                groups, skipped = group_uploads([(f.name, f.getvalue()) for f in files])
                 done = db.evaluated(k.case_id) if (db and skip_done) else set()
-                roster = {s["student_id"]: s for s in db.students()} if db else {}
+                roster = {s_["student_id"]: s_ for s_ in db.students()} if db else {}
                 out, zbuf = [], io.BytesIO()
+                for name, why in skipped:
+                    out.append({"File": name, "Student ID": "", "Name": "", "Batch": "", "Score": None,
+                                "Out of": None, "%": None, "File-ready": "", "Errors": None, "Read as": "",
+                                "Status": why if why.startswith("Skipped") else f"Skipped - {why}"})
                 bar = st.progress(0.0, text="Starting...")
                 with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as zout:
-                    for i, (name, data) in enumerate(todo, 1):
-                        bar.progress(i / len(todo), text=f"{i} of {len(todo)}: {name}")
-                        mt = FNAME.match(name)
-                        row = {"File": name, "Student ID": "", "Name": "", "Batch": "", "Score": None, "Out of": None,
-                               "%": None, "File-ready": "", "Errors": None, "Status": ""}
-                        if not mt:
-                            row["Status"] = "Skipped - name is not StudentID_CaseID.pdf"
-                            out.append(row)
-                            continue
-                        sid, case = mt.group(1).upper(), mt.group(2).upper()
-                        row["Student ID"] = sid
+                    for i, g in enumerate(groups, 1):
+                        bar.progress(i / max(len(groups), 1), text=f"{i} of {len(groups)}: {g.student_id}")
+                        sid = g.student_id
                         stud = roster.get(sid, {})
-                        row["Name"], row["Batch"] = stud.get("name") or "", stud.get("batch") or ""
-                        if case != k.case_id.upper():
-                            row["Status"] = f"Skipped - file is for case {case}"
+                        row = {"File": g.label[:200], "Student ID": sid, "Name": stud.get("name") or "",
+                               "Batch": stud.get("batch") or "", "Score": None, "Out of": None, "%": None,
+                               "File-ready": "", "Errors": None, "Read as": "", "Status": ""}
+                        if g.case_id != k.case_id.upper():
+                            row["Status"] = f"Skipped - file is for case {g.case_id}"
                         elif sid in done:
                             row["Status"] = "Skipped - already evaluated"
                         else:
                             try:
-                                res = evaluate_pdf(data, name, sid, row["Name"], k)
-                                save(sid, name, res)
+                                res = evaluate_files(g.load(), sid, row["Name"], k)
+                                save(sid, res)
                                 m = res["m"]
+                                warn = m["needs_review"] or res["notes"] or res["unlinked"]
                                 row.update({"Score": m["score"], "Out of": m["out_of"], "%": round(m["pct"] * 100, 1),
                                             "File-ready": "Yes" if m["file_ready"] else "No", "Errors": m["errors"],
-                                            "Status": "Evaluated" + (" - check unread items" if m["needs_review"] else "")})
+                                            "Read as": res["format"],
+                                            "Status": "Evaluated" + (" - check 'What the system read'" if warn else "")})
                                 if make_reports:
                                     zout.writestr(report_name(sid, k.case_id), res["report"])
                                 done.add(sid)
+                            except ReaderError as e:
+                                row["Status"] = f"Failed - {str(e)[:160]}"
                             except Exception as e:
-                                row["Status"] = f"Failed - {str(e)[:120]}"
+                                log.exception("bulk evaluation failed for %s", sid)
+                                row["Status"] = f"Failed - unexpected error ({type(e).__name__}); details logged"
                         out.append(row)
                 bar.progress(1.0, text="Finished")
                 ss.bulk_out = {"case": k.case_id, "table": pd.DataFrame(out),
@@ -491,7 +522,7 @@ with t_find:
     else:
         sid_q = st.text_input("Student ID").strip().upper()
         if sid_q:
-            evs = [e for e in db.evaluations() if e["student_id"] == sid_q]
+            evs = db.evaluations(student_id=sid_q)
             if not evs:
                 st.warning("No saved evaluations for this student ID.")
             else:
@@ -529,24 +560,29 @@ with t_find:
 # ------------------------------------------------------------------ build key
 with t_build:
     st.subheader("Build an answer key from the trainer's correct return")
-    st.write("Upload the trainer's **correct** return printed from ATX. Every filled-in item on every form is listed "
-             "in a new answer key. Open it in Excel, set marks, categories and feedback, then upload it in the left panel.")
-    good = st.file_uploader("Correct return (PDF from ATX)", type=["pdf"], key="goodret")
+    st.write("Upload the trainer's **correct** return: the ATX printout, or the filled-in IRS fillable forms "
+             "(select all of them). Every filled-in item on every form is listed in a new answer key. Open it in "
+             "Excel, set marks, categories and feedback, then upload it in the left panel.")
+    good = st.file_uploader("Correct return (PDF files)", type=["pdf"], accept_multiple_files=True, key="goodret")
     b1, b2, b3 = st.columns([1, 2, 1])
     cid = b1.text_input("Case ID", "C01")
     ctitle = b2.text_input("Case title", "")
-    cyear = b3.number_input("Tax year", 2015, 2035, 2020)
+    cyear = b3.number_input("Tax year", 2015, 2035, 2025)
     b4, b5 = st.columns(2)
     dmarks = b4.number_input("Default marks per item", 0.0, 100.0, 1.0, 0.5)
     dunx = b5.number_input("Marks deducted per unexpected entry", 0.0, 100.0, 1.0, 0.5)
-    if st.button("Build answer key", disabled=good is None):
+    if st.button("Build answer key", disabled=not good):
         try:
-            data, n, forms = draft_from_return(good.getvalue(), cid, ctitle, int(cyear), dmarks, dunx)
-        except Exception as e:
-            st.error(f"Could not read this return: {e}")
+            data, n, forms = draft_from_return([(f.name, f.getvalue()) for f in good], cid, ctitle, int(cyear),
+                                               dmarks, dunx)
+        except ReaderError as e:
+            st.error(str(e))
+        except Exception:
+            log.exception("building a key failed")
+            st.error("Could not read this return. The details were logged; check the files and try again.")
         else:
             if n == 0:
-                st.error("No filled-in items were found. Make sure this is the complete return printed from ATX.")
+                st.error("No filled-in items were found. Upload the complete ATX printout, or the saved fillable forms.")
             else:
                 st.success(f"{n} items found on: {', '.join(forms)}")
                 st.download_button("Download draft answer key (.xlsx)", data, file_name=f"answer_key_{clean(cid)}.xlsx")
@@ -562,7 +598,7 @@ with t_data:
             st.write("Erasing data needs the admin password.")
             apw = st.text_input("Admin password", type="password", key="adminpw")
             if st.button("Unlock"):
-                if apw == ADMIN:
+                if hmac.compare_digest(apw.encode(), str(ADMIN).encode()):
                     ss.admin_ok = True
                     st.rerun()
                 else:
@@ -626,8 +662,17 @@ with t_help:
 1. *(Once)* Upload the student roster with batches under **Students & batches**.
 2. *(Once per case)* Upload the case answer key in the left panel - it is saved, and from then on you just pick it
    from **Saved cases**.
-3. Evaluate returns **one at a time** or **in bulk** (many PDFs or a zip). Files must be named `StudentID_CaseID.pdf`.
-   Every evaluation is saved; evaluating the same student and case again replaces the earlier result.
+3. Evaluate returns **one at a time** or **in bulk** (many PDFs or zips). Files must be named `StudentID_CaseID.pdf`;
+   for IRS fillable forms a student may have several: `StudentID_CaseID_1040.pdf`, `StudentID_CaseID_SchC.pdf` ...
+   or a folder `StudentID_CaseID`. Every evaluation is saved; evaluating the same student and case again replaces
+   the earlier result.
+
+**Two kinds of returns** (recognised automatically)
+- **ATX printout**: the complete return printed to PDF from ATX.
+- **IRS fillable forms**: the IRS's own fillable PDFs, filled in and **saved** (File > Save) in Adobe Acrobat Reader.
+  Don't use *Print to PDF* - that removes the boxes and nothing can be read. One PDF per form is best; don't merge them.
+  Any filled-in box the reader cannot link to a line is listed under *What the system read*; mark it with
+  `field: <box name>` in the key.
 4. Use **Management dashboard** for batch and case results, the management PDF / Excel and consolidated student
    reports, and **Find a report** to download any student's report again.
 
@@ -642,5 +687,5 @@ deduct the marks set in the key; a missing form makes all its items wrong; unrea
 **Erasing data**: the **Data management** tab (admin password) erases a case's results, a whole case, a batch, a
 student, or everything.
 
-**Privacy**: student returns are not stored - only scores and mistakes. Without a database nothing is kept after the tab closes.
+**Privacy**: student returns are not stored - only scores, mistakes and the reader's notes. Without a database nothing is kept after the tab closes.
 """)

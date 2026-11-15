@@ -4,3 +4,6 @@ answer_key_C*.xlsx
 tests/out/
 .streamlit/secrets.toml
 __pycache__/
+# blank IRS forms used by the tests (no student data)
+!tests/fixtures/*.pdf
+.pytest_cache/

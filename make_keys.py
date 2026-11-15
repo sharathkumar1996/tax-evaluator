@@ -5,7 +5,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.datavalidation import DataValidation
 
-from grader_core import KEY_COLS, F1040_FIELDS, ReturnPDF, describe, guess_category
+from grader_core import KEY_COLS, F1040_FIELDS, describe, guess_category
 
 F = "Arial"
 NAVY = "1F3864"
@@ -124,21 +124,26 @@ def _sort_key(fld):
     if ln.startswith("dep"):
         return (form_rank, fld["form"], 1, 0, ln)
     import re
-    m = re.match(r"^(\d+)([a-z]*)$", ln.lower())
+    m = re.match(r"^(\d+)([a-z]*)", ln.lower())
     return (form_rank, fld["form"], 2, int(m.group(1)) if m else 999, m.group(2) if m else ln)
 
 
-def draft_from_return(pdf_bytes, case_id, title, year, marks=1, unexpected=1):
-    """Read every filled-in item from a CORRECT return and lay it out as an answer key."""
-    ret = ReturnPDF(pdf_bytes)
+def draft_from_return(files, case_id, title, year, marks=1, unexpected=1):
+    """Read every filled-in item from a CORRECT return and lay it out as an answer key.
+    files: PDF bytes (one ATX printout) or a list of (file name, bytes)."""
+    from readers import read_return
+    if isinstance(files, (bytes, bytearray)):
+        files = [("return.pdf", bytes(files))]
+    ret = read_return(files)
     rows = []
     for i, fld in enumerate(sorted(ret.all_fields(), key=_sort_key), 1):
         v = fld["value"]
         if isinstance(v, float) and v == int(v):
             v = int(v)
         num = isinstance(v, (int, float))
-        rows.append((i, guess_category(fld["form"], fld["line"]), fld["form"], fld["line"],
-                     describe(fld["form"], fld["line"], f"{fld['form']} line {fld['line']}"),
+        desc = (fld["desc"] if fld.get("prefer_desc") and fld.get("desc")
+                else describe(fld["form"], fld["line"], fld.get("desc") or f"{fld['form']} line {fld['line']}"))
+        rows.append((i, guess_category(fld["form"], fld["line"]), fld["form"], fld["line"], desc,
                      v, marks, 1 if num else 0, ""))
     return build(case_id, title, year, rows, unexpected), len(rows), ret.forms_found()
 

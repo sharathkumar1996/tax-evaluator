@@ -1,7 +1,12 @@
-# Tax Return Evaluator (ATX → evaluation report)
+# Tax Return Evaluator (ATX or IRS fillable forms → evaluation report)
 
-Staff upload a case **answer key** (Excel) once, then upload **one student return** (ATX PDF,
-all pages and schedules) at a time. The app checks every item in the key and produces a
+Staff upload a case **answer key** (Excel) once, then upload student returns one at a time or in bulk.
+A return can be either
+- an **ATX printout** (the complete return printed to PDF from ATX), or
+- the **IRS fillable forms** (Form 1040, schedules and other forms from irs.gov, filled in and *saved*).
+  One PDF per form is fine.
+
+The app recognises which kind each return is. The app checks every item in the key and produces a
 **PDF evaluation report** named `Evaluation_report_<StudentID>_<CaseID>.pdf`: overall score,
 marks by category, and every mistake (form + line, student entry, correct entry, marks lost, feedback).
 
@@ -14,7 +19,10 @@ Nothing is stored on the server. The key, returns and results exist only in the 
 | File | Purpose |
 |---|---|
 | `app.py` | The Streamlit app |
-| `grader_core.py` | Reads ATX PDFs (1040 + schedules/forms) and marks them against the key |
+| `readers.py` | Chooses the reader for each return and checks file limits |
+| `irs_reader.py` | Reads IRS fillable forms (the values stored in the form's boxes) |
+| `grader_core.py` | Reads ATX PDFs (1040 + schedules/forms) and marks returns against the key |
+| `bulk.py` | Groups a bulk upload (PDFs / zips) into one return per student, with zip safety limits |
 | `report_pdf.py` | Builds the student PDF report |
 | `db.py` | Saves students, batches, case keys, scores and mistakes (Neon Postgres) |
 | `metrics.py` | File-ready rate, bottom-line accuracy, average errors per return |
@@ -22,7 +30,7 @@ Nothing is stored on the server. The key, returns and results exist only in the 
 | `answer_key_template.xlsx` | Blank key for trainers (downloadable inside the app) |
 | `make_keys.py` | Template builder and the 'build key from a correct return' function |
 | `requirements.txt`, `.streamlit/config.toml` | Deployment settings |
-| `tests/make_mock_complex.py` | Test-only mock multi-schedule return |
+| `tests/` | Automated tests (`python -m pytest tests`), with a blank 2025 Form 1040 as a test form |
 
 ## Deploy for free on Streamlit Community Cloud (about 15 minutes)
 
@@ -35,7 +43,7 @@ Nothing is stored on the server. The key, returns and results exist only in the 
 3. **Streamlit.** Go to share.streamlit.io, sign in with GitHub, and allow access to the
    private repo when asked.
 4. Click **Create app** and choose to deploy from a GitHub repository. Then set:
-   - Repository: `your-name/tax-evaluator` · Branch: `main` · Main file: `app.py`
+   - Repository: `your-name/tax-evaluator` · Branch: `irs-fillable` (this version) · Main file: `app.py`
    - App URL: choose one, e.g. `simandhar-tax-eval`
 5. Open **Advanced settings**. Set Python to **3.12** and paste into **Secrets**:
    ```toml
@@ -79,7 +87,7 @@ connection string in the test app, so test data never mixes with real results.
 
 ## Going back to the previous version
 
-The branch `stable-v1` is the version without a database. To go back, open the app's
+The branch `database` is the ATX-only version with the database; `stable-v1` is the version without a database. To go back, open the app's
 **Settings** in Streamlit and change the branch to `stable-v1`, or deploy a second app from it.
 Data already saved in Neon is not affected.
 
@@ -91,7 +99,7 @@ streamlit run app.py
 
 ## Writing answer keys
 Fastest: in the app, open **Build a key from a correct return** and upload the trainer's correct
-ATX return. You get a workbook listing every filled-in item on every form. Set marks, categories and
+return (ATX printout or fillable forms). You get a workbook listing every filled-in item on every form. Set marks, categories and
 feedback, then upload it as the key.
 
 Each row is Category, Form (`1040`, `Schedule C`, `Schedule SE`, `Form 8863`, `Schedule C #2` ...),
@@ -107,13 +115,52 @@ Line, Correct Value, Marks, Tolerance and Feedback. Line can be:
 Leave Correct Value blank when the box must be empty.
 
 ## Bulk evaluation
-Choose **Many returns at once (bulk)**, then upload several PDFs or one zip. Files must be named
-`StudentID_CaseID.pdf`; files for another case, badly named files and (optionally) students
-already evaluated are skipped and listed. Upload large batches in parts of about 100 returns.
+Choose **Many returns at once (bulk)**, then upload several PDFs or zips. Name the files:
+- `StudentID_CaseID.pdf`: one PDF per student (ATX printout), or
+- `StudentID_CaseID_<anything>.pdf`: several PDFs per student (e.g. `S0123_C03_1040.pdf`, `S0123_C03_SchC.pdf`), or
+- a folder `StudentID_CaseID` holding that student's PDFs (inside a zip).
+
+Files for another case, badly named files and (optionally) students already evaluated are skipped and
+listed. Upload large batches in parts of about 100 returns. Zips are checked before unpacking
+(at most 5,000 files, 25 MB per PDF, 1.5 GB unpacked).
+
+## IRS fillable forms
+Students download the fillable forms from irs.gov, fill them in **Adobe Acrobat Reader** and save them
+(**File > Save**). They must not use *Print to PDF*: printing removes the boxes and the app then
+says so instead of marking. Don't merge the forms into one PDF; merging tools often mix up the
+boxes, because every IRS form uses the same internal box names (the app warns if it sees this).
+
+How the reader works: every entry is stored in a named box, so the value is exactly what the student
+typed, whatever it looks like on screen. The reader links each box to its line from the blank form
+itself: the box right of a bold line number is that line (`1a`, `11a`, `25d`; with the column
+letter on multi-column rows, `1a (h)`); text boxes are found by the label above them; check boxes by
+the label to their right. This link depends only on the blank form, so it is the same for every
+student, and it is cached, so bulk marking is fast.
+
+Answer keys use the same Line names as for ATX (see below). Keys are per tax year: the 2025 Form 1040
+has lines such as `11a`, `11b` and `12e`. Build the key from the trainer's correct fillable return
+(**Build a key from a correct return**) to get the right line names. A filled-in box the reader
+cannot link to a line is listed under **What the system read**, and you can mark it with
+`field: <box name>` in the key (e.g. `field: f1_47`).
+
+Tested on the 2025 Form 1040 (every line, the filing status, the dependents table, check boxes and
+name/address boxes). For each other form you use (Schedules 1-3, C, SE ...), run one trainer
+return through the app and check **What the system read** before marking students.
+
+## Reliability
+- One reader per return format, behind one interface: marking, the database and all reports are shared.
+- Saving an evaluation, and every erase, is a single database transaction: saved completely or not at all.
+- Database connections come from a pool and are checked before use (Neon closes idle connections);
+  a dropped connection is retried automatically.
+- Database upgrades only add columns and are versioned, so the older `database` branch can still use the
+  same Neon database. Still, give a test app its own Neon branch.
+- Each return in a bulk upload is marked and saved on its own: one bad file is reported as failed and
+  the rest continue. Unexpected errors are written to the app log (Streamlit: **Manage app → Logs**).
+- Limits on file size, pages and zip contents stop oversized uploads from crashing the app.
 
 ## Limits to know
-- Calibrated on **ATX 2020** output. A different ATX year or version: run one return through it and
+- ATX reader calibrated on **ATX 2020** output. A different ATX year or version: run one return through it and
   check the "What the system read" panel.
 - Form tables with many rows (e.g. Form 8949 transaction lists) are checked through their numbered
   total lines, not row by row.
-- PDFs must be printed from ATX, not scanned.
+- PDFs must be printed from ATX or saved from the fillable forms, not scanned.
