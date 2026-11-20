@@ -186,6 +186,7 @@ class PageTemplate:
     desc: dict = field(default_factory=dict)         # line label -> printed description
     deps: dict = field(default_factory=dict)         # (dep no, attr) -> widget key
     fs: dict = field(default_factory=dict)           # check box key -> filing status code
+    choice: dict = field(default_factory=dict)       # check box key -> (line, option) for Yes/No and pick-one boxes
 
 
 def _words(page):
@@ -232,7 +233,9 @@ def _build_template(plpage, widgets):
     t = PageTemplate()
     t.form, t.cont = _identify(plpage)
     words = _words(plpage)
-    labels = [w for w in words if _bold(w["fontname"]) and LABEL.match(w["text"].lower())]
+    words = _merge_line_numbers(words)
+    labels = [w for w in words if _bold(w["fontname"]) and LABEL.match(w["text"].lower())
+              and w.get("size", 9) < 12]                      # not the big '20' of the year in the corner
     # Numbered sub-boxes inside a sentence ("Check if: 1 Rollover  2 QCD  3 [  ]") are not lines:
     # they come as consecutive single digits on one row, unlike real line numbers.
     def sub_box(lb):
@@ -240,8 +243,9 @@ def _build_template(plpage, widgets):
             return False
         n = int(lb["text"])
         return any(o is not lb and abs(o["cy"] - lb["cy"]) <= 3 and re.fullmatch(r"\d", o["text"])
-                   and abs(int(o["text"]) - n) == 1 for o in labels)
+                   and abs(int(o["text"]) - n) == 1 and abs(o["x0"] - lb["x0"]) < 130 for o in labels)
     labels = [lb for lb in labels if not sub_box(lb)]
+    labels += _sub_letter_labels(words, labels, widgets)
     heads = [w for w in words if re.fullmatch(r"\([a-z]\)", w["text"])]
 
     def same_row(w, cy, tol=ROW_TOL):
@@ -278,13 +282,8 @@ def _build_template(plpage, widgets):
             if k in by_label:
                 by_label[k].append((wd, lb, False))
 
-    def column(wd, lb):
-        cx = (wd.x0 + wd.x1) / 2
-        hs = [h for h in heads if 0 < lb["top"] - h["top"] < 260 and abs((h["x0"] + h["x1"]) / 2 - cx) < 45]
-        if not hs:
-            return None
-        h = min(hs, key=lambda h: (lb["top"] - h["top"]) + abs((h["x0"] + h["x1"]) / 2 - cx))
-        return h["text"].strip("()")
+    def column(wd, lb=None):
+        return _column(wd, widgets, words)
 
     for (text, _), items in by_label.items():
         ln = text.lower()
@@ -309,7 +308,298 @@ def _build_template(plpage, widgets):
 
     if t.form == "1040" and not t.cont:
         _map_1040_page1(t, widgets, words)
+    if t.form and t.form != "1040":
+        _map_row_labels(t, widgets, labels)
+        _map_tables(t, widgets, words)
+        _map_lists(t, widgets, words, labels)
+        _map_checks(t, widgets, words, labels)
+        _map_header(t, widgets, words)
     return t
+
+
+# ------------------------------------------------------------------ schedules: tables, lists, check boxes
+HEAD_LETTER = re.compile(r"^\(([a-k])\)$|^([A-D])$")
+
+
+def _merge_line_numbers(words):
+    """'44' + 'a' printed as two bold pieces on one row -> one label '44a'."""
+    out, skip = [], set()
+    ws = sorted(words, key=lambda w: (round(w["top"]), w["x0"]))
+    for i, w in enumerate(ws):
+        if i in skip:
+            continue
+        if _bold(w["fontname"]) and re.fullmatch(r"\d{1,3}", w["text"]) and i + 1 < len(ws):
+            n = ws[i + 1]
+            if (_bold(n["fontname"]) and re.fullmatch(r"[a-z]", n["text"]) and abs(n["top"] - w["top"]) < 2
+                    and 0 <= n["x0"] - w["x1"] < 3):
+                m = dict(w, text=w["text"] + n["text"], x1=n["x1"])
+                out.append(m)
+                skip.add(i + 1)
+                continue
+        out.append(w)
+    return out
+
+
+def _sub_letter_labels(words, labels, widgets=()):
+    """A bold 'b' at the left margin under '29a' is line 29b (rows with no number on the right); a bold
+    'a' / 'b' / 'c' just before a box further along the row ('33 ... a [ ] Cost  b [ ] Lower of cost') is
+    line 33a / 33b / 33c."""
+    out = []
+    for w in words:
+        if not (_bold(w["fontname"]) and re.fullmatch(r"[a-z]", w["text"])):
+            continue
+        nxt = [wd for wd in widgets if abs(wd.cy - w["cy"]) <= 6 and wd.x0 >= w["x1"]]
+        before_box = bool(nxt) and min(wd.x0 for wd in nxt) - w["x1"] < 160
+        if not (w["x0"] < 130 or before_box):
+            continue
+        if any(lb["x0"] < w["x0"] and abs(lb["cy"] - w["cy"]) < 3 and re.fullmatch(r"\d{1,3}[a-z]", lb["text"])
+               and w["x0"] - lb["x1"] < 3 for lb in labels):
+            continue                                                 # already part of '44a'
+        above = [lb for lb in labels if lb["x0"] < 130 and -3 < w["top"] - lb["top"] < 60
+                 and re.fullmatch(r"\d{1,3}[a-z]?", lb["text"])]
+        if not above:
+            continue
+        lb = max(above, key=lambda lb: lb["top"])
+        num = re.match(r"\d+", lb["text"]).group(0)
+        letters = lb["text"][len(num):]
+        if letters and ord(w["text"]) <= ord(letters[-1]):
+            continue
+        if not letters and w["text"] != "a" and not any(o["text"] == num + "a" for o in out):
+            continue                                                 # 'b' needs an 'a' before it
+        out.append(dict(w, text=num + w["text"], sub=True))
+    return out
+
+
+def _column(wd, widgets, words, depth=0):
+    """Column letter printed straight above a box ('(h)', or 'A'/'B'/'C' for properties); a box with no
+    header of its own takes the column of the nearest box above it in the same column."""
+    hs = []
+    for h in words:
+        m = HEAD_LETTER.match(h["text"])
+        if not m or h["bottom"] > wd.top + 1 or wd.top - h["bottom"] > 330:
+            continue
+        if any(o is not h and abs(o["cy"] - h["cy"]) < 2 and 0 <= h["x0"] - o["x1"] < 5 for o in words):
+            continue                                   # part of a sentence ('... columns (h) and (k)'), not a heading
+        cx = (h["x0"] + h["x1"]) / 2
+        pad = 22 if wd.kind == "check" else 3            # a small tick box sits inside a wider column
+        if wd.x0 - pad <= cx <= wd.x1 + pad:
+            hs.append((wd.top - h["bottom"], m.group(1) or m.group(2)))
+    own = None
+    if hs:
+        # a heading block can mention other columns lower down ('(h) ... combine with column (g)'):
+        # within the nearest block, the letter printed highest is the column's own
+        near = min(d for d, _ in hs)
+        own = max((d, c) for d, c in hs if d - near < 45)
+    if depth:
+        return own[1] if own else None
+    w = wd.x1 - wd.x0
+    above = [o for o in widgets if o is not wd and o.kind != "check" and o.bottom <= wd.top + 1
+             and wd.top - o.bottom < 330 and min(o.x1, wd.x1) - max(o.x0, wd.x0) > 0.6 * w
+             and (abs(o.x0 - wd.x0) < 8 or abs(o.x1 - wd.x1) < 8) and (o.x1 - o.x0) < 1.6 * w]
+    for o in sorted(above, key=lambda o: wd.top - o.bottom):
+        if own and wd.top - o.bottom > own[0]:
+            break                               # the heading is nearer than any box above
+        c = _column(o, widgets, words, 1)
+        if c:
+            return c                            # a 'Totals' box under a table takes the table's column
+    return own[1] if own else None
+
+
+def _header_phrase(wd, words):
+    """Printed column heading just above the first row of a table, e.g. 'fair rental days'."""
+    ws = [w for w in words if 0 <= wd.top - w["bottom"] < 45 and wd.x0 - 3 <= (w["x0"] + w["x1"]) / 2 <= wd.x1 + 3
+          and not re.fullmatch(r"[A-D]", w["text"])]
+    return " ".join(w["text"] for w in sorted(ws, key=lambda w: (round(w["top"]), w["x0"]))).lower()
+
+
+def _segs(name):
+    return [re.sub(r"\[\d+\]$", "", s) for s in name.split(".")]
+
+
+def _map_row_labels(t, widgets, labels):
+    """A box far along a row from its line number, e.g. '2b Date of original divorce ... [    ]' or
+    '44  a Business [   ]  b Commuting [   ]': the nearest sub-line label on the left, if no box is between."""
+    taken = set(t.lines.values())
+    for wd in widgets:
+        if wd.kind == "check" or wd.key in t.lines:
+            continue
+        row = [lb for lb in labels if lb.get("sub") and abs(lb["cy"] - wd.cy) <= 6 and lb["x1"] <= wd.x0]
+        if not row:
+            continue
+        lb = max(row, key=lambda lb: lb["x1"])
+        if any(o is not wd and abs(o.cy - wd.cy) <= 6 and lb["x1"] < o.x0 < wd.x0 for o in widgets):
+            continue
+        ln = lb["text"].lower()
+        if ln not in taken:
+            t.lines[wd.key] = ln
+            taken.add(ln)
+
+
+def _map_tables(t, widgets, words):
+    """Rows the IRS form itself names as tables (Schedule D lines 1a-10, Schedule E properties A-C and
+    lines 28/33/38): each box gets 'line', 'line row' and/or '(column)', e.g. '1a (h)', '3 (B)', '28 A (f)'."""
+    groups = {}
+    for wd in widgets:
+        ln = row = None
+        for sg in _segs(wd.name):
+            m = re.fullmatch(r"Table_Line(\d{1,2})([a-z]?)(-[a-z])?", sg)
+            if m:
+                ln = m.group(1) if m.group(3) else m.group(1) + m.group(2)     # 28a-f -> 28, 1a -> 1a
+                continue
+            m = re.fullmatch(r"Row([A-F])", sg)
+            if m:
+                row = m.group(1)
+                continue
+            m = re.fullmatch(r"(?:Line|Row)(\d{1,2}[a-z]?)", sg)
+            if m:
+                if ln and re.fullmatch(r"\d", m.group(1)):
+                    continue                                       # Table_Line38 > Row1: a single row
+                ln = m.group(1)
+        if ln:
+            groups.setdefault((ln, row), []).append(wd)
+    if not groups:
+        return
+    for (ln, row), ws in groups.items():
+        base = ln + (f" {row}" if row else "")
+        if len(ws) == 1 and ws[0].kind != "check":
+            t.lines[ws[0].key] = base
+            continue
+        for wd in ws:
+            col = _column(wd, widgets, words)
+            if not col:
+                ph = _header_phrase(wd, words)
+                if not ph:
+                    first = [o for o in widgets if o is not wd and abs(o.x0 - wd.x0) < 3 and o.top < wd.top]
+                    if first:
+                        ph = _header_phrase(min(first, key=lambda o: o.top), words)
+                col = re.sub(r"[^a-z0-9 ]", "", ph)[:30].strip() or ("description" if wd.kind == "text" else None)
+            name = f"{base} ({col})" if col else base
+            if wd.kind == "check":
+                t.choice[wd.key] = (name, "Checked")
+            else:
+                t.lines[wd.key] = name
+
+
+LIST_LINES = {"SCH B": [("1", "2", "payer"), ("5", "6", "payer")], "SCH C": [("47b", "48", "description")]}
+
+
+def _map_lists(t, widgets, words, labels):
+    """Lists of names and amounts: Schedule B lines 1 and 5, Schedule C Part V -> '1 (payer 3)' / '1 (amount 3)'."""
+    for start, end, what in LIST_LINES.get(t.form, []):
+        s = [lb for lb in labels if lb["text"] == start]
+        e = [lb for lb in labels if lb["text"] == end]
+        if not s or not e:
+            continue
+        top = min(lb["top"] for lb in s) - 14
+        bottom = min(lb["top"] for lb in e if lb["top"] > top) - 1
+        ln = start if t.form == "SCH B" else end
+        if t.form == "SCH C":
+            top = max(lb["bottom"] for lb in s) + 12
+            bottom = max(lb["top"] for lb in e) + 1
+        rows = {}
+        for wd in widgets:
+            if wd.kind == "text" and top <= wd.top and wd.bottom <= bottom + 6:
+                rows.setdefault(round(wd.cy / 4), []).append(wd)
+        n = 0
+        for _, ws in sorted(rows.items()):
+            ws.sort(key=lambda w: w.x0)
+            if len(ws) == 1 and ws[0].x1 - ws[0].x0 > 200 and n == 0 and t.form == "SCH B":
+                pass
+            n += 1
+            amt = ws[-1] if len(ws) > 1 or ws[0].x0 > 400 else None
+            for wd in ws:
+                if t.lines.get(wd.key) == end:
+                    continue
+                t.lines[wd.key] = f"{ln} ({'amount' if wd is amt else what} {n})"
+        t.desc[ln] = {("SCH B", "1"): "Interest payer list", ("SCH B", "5"): "Dividend payer list",
+                      ("SCH C", "48"): "Other expenses list"}.get((t.form, ln), t.desc.get(ln, ""))
+
+
+def _map_checks(t, widgets, words, labels):
+    """Check boxes on schedules. Boxes of one field that answer one question (Yes/No, Cash/Accrual/Other)
+    become one line whose value is the option ticked; a lone box becomes a line valued Checked/Unchecked.
+    The question is the nearest line number (or capital letter A-J at the margin) on or above its row."""
+    letters = [w for w in words if _bold(w["fontname"]) and re.fullmatch(r"[A-J]", w["text"]) and w["x0"] < 60]
+    marks = labels + letters
+    used_lines = set(t.lines.values())
+
+    def question(wd):
+        c = [lb for lb in marks if lb["x1"] <= wd.x0 + 1 and lb["cy"] <= wd.cy + 4 and wd.cy - lb["cy"] < 70]
+        if not c:
+            return None
+        same_row = [lb for lb in c if abs(lb["cy"] - wd.cy) <= 5]
+        lb = max(same_row, key=lambda lb: lb["x1"]) if same_row else max(c, key=lambda lb: (lb["cy"], lb["x1"]))
+        return lb["text"] if re.fullmatch(r"[A-J]", lb["text"]) else lb["text"].lower()
+
+    def option(wd):
+        near = [w for w in words if abs(w["cy"] - wd.cy) <= 5 and wd.x1 - 1 <= w["x0"] <= wd.x1 + 14]
+        if near:
+            w = min(near, key=lambda w: w["x0"])
+            if w["text"].startswith("(") and len(near) > 1:
+                w = sorted(near, key=lambda w: w["x0"])[1]
+            return w["text"].strip("().,:;").capitalize() or None
+        hd = [w for w in words if w["text"] in ("Yes", "No") and w["bottom"] <= wd.top + 1
+              and wd.x0 - 6 <= (w["x0"] + w["x1"]) / 2 <= wd.x1 + 6 and wd.top - w["bottom"] < 320]
+        if hd:
+            return max(hd, key=lambda w: w["bottom"])["text"]
+        return None
+
+    fields = {}
+    for wd in widgets:                       # Yes/No boxes are often separate fields c1_2[0], c1_2[1]
+        if wd.kind == "check" and wd.key not in t.choice:
+            fields.setdefault(re.sub(r"\[\d+\]$", "", wd.name), []).append(wd)
+    taken = {}
+    for name, kids in sorted(fields.items(), key=lambda kv: (min(k.top for k in kv[1]), min(k.x0 for k in kv[1]))):
+        qs = [question(k) for k in kids]
+        if len(kids) > 1 and len(set(qs)) == 1 and qs[0]:
+            ln = qs[0]
+            taken[ln] = taken.get(ln, 0) + 1
+            if taken[ln] > 1:
+                ln = f"{ln} ({taken[ln]})"                       # a second Yes/No under the same number
+            for k in kids:
+                t.choice[k.key] = (ln, option(k) or "Checked")
+            continue
+        for k, q in zip(kids, qs):
+            if not q:
+                continue
+            o = option(k) or ""
+            tag = o if re.fullmatch(r"\d{4}", o) else "check"         # '4 (4797)' / '14 (check)'
+            ln = q if q not in used_lines and q not in taken else f"{q} ({tag})"
+            if ln in taken:
+                ln = f"{ln} {taken[ln] + 1}"
+            taken[ln] = taken.get(ln, 0) + 1
+            t.choice[k.key] = (ln, "Checked")
+
+
+HEADER_BOXES = [("namesshown", "name"), ("nameofproprietor", "name"), ("socialsecuritynumber", "ssn")]
+
+
+def _map_header(t, widgets, words):
+    """Name / SSN at the top of every schedule; Schedule C boxes A-E and the address parts."""
+    for wd in widgets:
+        if wd.kind == "check" or wd.key in t.lines:
+            continue
+        lab = t.above.get(wd.key, "")
+        if wd.top < 140:
+            for key, ln in HEADER_BOXES:
+                ln = f"{ln} (page 2)" if t.cont else ln
+                if key in lab and ln not in t.lines.values():
+                    t.lines[wd.key] = ln
+                    break
+        if wd.key in t.lines or t.form != "SCH C":
+            continue
+        tag = [w for w in words if _bold(w["fontname"]) and re.fullmatch(r"[A-E]", w["text"])
+               and (-3 <= wd.top - w["bottom"] < 14 and wd.x0 - 12 <= w["x0"] <= wd.x0 + 8
+                    or abs(w["cy"] - wd.cy) <= 6 and w["x0"] < 60 and wd.x0 - w["x1"] < 260)]
+        if tag:
+            t.lines[wd.key] = tag[0]["text"]
+            continue
+        for key, ln in (("aptno", "E apt"), ("citytown", "E city"), ("state", "E state"), ("zipcode", "E zip"),
+                        ("otherspecify", "F other"), ("squarefootageofayour", "30 (a)"), ("ayourhome", "30 (a)"),
+                        ("bthepartofyour", "30 (b)"), ("44abusiness", "44a"), ("44bcommuting", "44b")):
+            if key in lab and ln not in t.lines.values():
+                t.lines[wd.key] = ln
+                break
 
 
 def _map_1040_page1(t, widgets, words):
@@ -460,14 +750,27 @@ class IRSReturn:
                 raise ReaderError(f"{fname} is not a readable PDF ({type(e).__name__}).")
             if n > max_pages:
                 raise ReaderError(f"{fname} has {n} pages; the limit is {max_pages}.")
+            try:
+                page_widgets = [_widgets(pg) for pg in pages]
+            except Exception as e:
+                raise ReaderError(f"{fname} is damaged and could not be read ({type(e).__name__}). "
+                                  "Ask the student to save the form again and re-upload it.")
+            if not any(page_widgets):
+                # A printed / flattened copy holds no readable entries. Skipping it keeps it from taking
+                # the place of the real (fillable) copy of the same form.
+                self.n_pages += n
+                for pno in range(1, n + 1):
+                    self.page_map.append((f"{fname} p{pno}", "(printed copy - not read)"))
+                self.notes.append(f"{fname}: no fillable boxes found - if it was printed to PDF, save the filled "
+                                  "form instead (File > Save) and upload that copy. This file was not marked.")
+                continue
             pl = None
-            last, parents, file_widgets = None, {}, 0
+            last, parents = None, {}
             try:
                 for pno in range(1, n + 1):
                     self.n_pages += 1
                     pg = pages[pno - 1]
-                    wds = _widgets(pg)
-                    file_widgets += len(wds)
+                    wds = page_widgets[pno - 1]
                     fp = _fingerprint(pg, wds)
 
                     def build():
@@ -499,19 +802,15 @@ class IRSReturn:
             finally:
                 if pl is not None:
                     pl.close()
-            if file_widgets:
-                any_widgets = True
-            else:
-                self.notes.append(f"{fname}: no fillable boxes found - if it was printed to PDF, save the filled "
-                                  "form instead (File > Save) and upload that copy.")
+            any_widgets = True
             if any(len(v) > 1 for v in parents.values()):
                 self.notes.append(f"{fname}: several forms share field names in this file (it looks merged). "
                                   "Merging can mix up entries - upload each form as a separate PDF.")
-        if not self.copies:
-            raise ReaderError("No IRS form pages were recognised in the uploaded file(s).")
         if not any_widgets:
             raise ReaderError("None of the files has fillable boxes. They look printed or flattened: open the "
                               "fillable IRS form, fill it in, save it (File > Save) and upload the saved file.")
+        if not self.copies:
+            raise ReaderError("No IRS form pages were recognised in the uploaded file(s).")
         multi = sorted(f"{f} ({n} copies)" for f, n in counts.items() if n > 1)
         if multi:
             self.notes.append("Forms appearing more than once: " + ", ".join(multi) + ". Each copy is marked as "
@@ -522,6 +821,9 @@ class IRSReturn:
                 for k, code in tpl.fs.items():
                     if wmap.get(k) and wmap[k].value is True:
                         self.filing_status = code if self.filing_status is None else "MULTIPLE"
+        if not self.all_fields():
+            self.notes.append("No entries were found on any form - the forms look blank. If the student filled "
+                              "them in, they were probably not saved (File > Save) before uploading.")
 
     # ---------------------------------------------------------------- helpers
     def forms_found(self):
@@ -535,7 +837,7 @@ class IRSReturn:
 
     def _line_widget(self, copy, ln):
         for _, tpl, w in self._items(copy):
-            if tpl.lines.get(w.key) == ln:
+            if w.key in tpl.lines and norm_line(tpl.lines[w.key]) == ln:
                 return w
         return None
 
@@ -670,8 +972,47 @@ class IRSReturn:
             return (("Checked" if c else "Unchecked"), "") if c is not None else (None, f"'{phrase}' not found on {name}")
         w = self._line_widget(copy, ln)
         if w is None:
+            opts = self._choice(copy, ln)
+            if opts is not None:
+                return opts, ""
             return None, f"Line {ln} not found on {name}"
         return self._amount(w), ""
+
+    @staticmethod
+    def _describe(tpl, fname, ln):
+        """'3 (B)' -> 'Rents received: property B'; '1 (payer 3)' -> 'Interest payer list: payer 3'."""
+        m = re.match(r"^(\S+)(?: ([A-F]))?(?: \((.+)\))?$", ln)
+        if not m:
+            return tpl.desc.get(ln, "") or f"{fname} line {ln}"
+        base, row, col = m.groups()
+        d = tpl.desc.get(ln) if not (row or col) else tpl.desc.get(base, "")
+        parts = [d or f"{fname} line {base}"]
+        if row:
+            parts.append(f"row {row}")
+        if col:
+            parts.append(f"property {col}" if re.fullmatch(r"[A-C]", col) else
+                         f"column ({col})" if re.fullmatch(r"[a-k]", col) else col)
+        return parts[0] + (": " + ", ".join(parts[1:]) if len(parts) > 1 else "")
+
+    def _choice(self, copy, ln):
+        """Value of a check-box question: the option ticked ('Yes', 'Cash', 'Checked'), '' if none,
+        'Unchecked' for a lone box left empty; None if the form has no such question."""
+        found, ticked = False, []
+        for _, tpl, w in self._items(copy):
+            c = tpl.choice.get(w.key)
+            if c and norm_line(c[0]) == ln:
+                found = True
+                if w.value:
+                    ticked.append(c[1])
+        if not found:
+            return None
+        if len(ticked) > 1:
+            return "More than one box checked"
+        if ticked:
+            return ticked[0]
+        lone = sum(1 for _, tpl, w in self._items(copy) if tpl.choice.get(w.key, ("",))[0] and
+                   norm_line(tpl.choice[w.key][0]) == ln) == 1
+        return "Unchecked" if lone else ""
 
     # ---------------------------------------------------------------- everything filled in
     def all_fields(self):
@@ -704,9 +1045,19 @@ class IRSReturn:
                     seen.add(ln)
                     used.add(w.key)
                     if w.value not in ("", None, False):
-                        base = ln.split(" (")[0]
                         out.append({"form": fname, "line": ln, "value": self._amount(w), "prefer_desc": True,
-                                    "desc": tpl.desc.get(base, "") or f"{fname} line {ln}"})
+                                    "desc": self._describe(tpl, fname, ln)})
+            done_choice = set()
+            for _, tpl, w in self._items(copy):
+                c = tpl.choice.get(w.key)
+                if not c:
+                    continue
+                used.add(w.key)
+                if w.value and c[0] not in done_choice:
+                    done_choice.add(c[0])
+                    v = self._choice(copy, norm_line(c[0]))
+                    out.append({"form": fname, "line": c[0], "value": v, "prefer_desc": True,
+                                "desc": self._describe(tpl, fname, c[0])})
             for _, tpl, w in self._items(copy):
                 if w.key in used or w.value in ("", None, False):
                     continue

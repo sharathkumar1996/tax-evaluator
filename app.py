@@ -27,7 +27,7 @@ from irs_reader import ReaderError
 from make_keys import draft_from_return
 from metrics import (CRITICAL_TEXT, flag, group_table, headline, rebuild_rows, return_metrics, student_table,
                      top_mistakes)
-from readers import read_return
+from readers import ATX_NAME, AUTO, IRS_NAME, read_return
 from report_pdf import build_report
 
 st.set_page_config(page_title="Tax Return Evaluator", page_icon="📝", layout="wide")
@@ -166,7 +166,19 @@ with st.sidebar:
     if ss.key:
         k = ss.key
         st.success(f"Case {k.case_id} ready")
-        st.caption(f"{k.title}  \nTax year {k.tax_year} · {len(k.steps)} items · {k.total:g} marks")
+        st.caption(f"{k.title}  \nTax year {k.tax_year} · {len(k.steps)} items · {k.total:g} marks, "
+                   "scored out of 100")
+        wt = {}
+        for s_ in k.steps:
+            c_ = wt.setdefault(s_["Category"], [0, 0.0])
+            c_[0] += 1
+            c_[1] += s_["Marks"]
+        st.dataframe(pd.DataFrame([{"Category": c_, "Items": n_, "Marks": m_,
+                                    "Weight /100": round(m_ / k.total * 100, 1) if k.total else 0}
+                                   for c_, (n_, m_) in wt.items()]),
+                     hide_index=True, use_container_width=True,
+                     column_config={"Weight /100": st.column_config.ProgressColumn(
+                         "Weight /100", format="%.1f", min_value=0, max_value=100)})
     tpl = HERE / "answer_key_template.xlsx"
     if tpl.exists():
         st.download_button("Download blank answer-key template", tpl.read_bytes(), file_name="answer_key_template.xlsx")
@@ -177,10 +189,10 @@ t_eval, t_students, t_mgmt, t_integ, t_find, t_build, t_data, t_help = st.tabs(
      "Build a key from a correct return", "Data management", "How it works"])
 
 
-def evaluate_files(files, sid, sname, key):
+def evaluate_files(files, sid, sname, key, expect=None):
     """Read and grade one student's return (one or more PDFs); returns rows, metrics and the PDF report.
     Raises ReaderError with a message the user can act on."""
-    ret = read_return(files)
+    ret = read_return(files, expect=expect)
     rows = flag(grade(ret, key))
     m = return_metrics(rows)
     cats, total, out_of = summarise(rows)
@@ -207,8 +219,8 @@ def show_result(r):
     rows, cats, m = r["rows"], r["cats"], r["m"]
     st.subheader(f"Evaluation - {r['Student Name']} ({r['Student ID']})")
     c = st.columns(5)
-    c[0].metric("Score", f"{m['score']:g} / {m['out_of']:g}")
-    c[1].metric("Percentage", f"{m['pct']:.0%}")
+    c[0].metric("Score / 100", f"{round(m['pct'] * 100, 1):g}")
+    c[1].metric("Marks", f"{m['score']:g} / {m['out_of']:g}")
     c[2].metric("File-ready", "Yes" if m["file_ready"] else "No")
     c[3].metric("Refund / owed", "-" if m["bottom_line"] is None else ("Right" if m["bottom_line"] else "Wrong"))
     c[4].metric("Errors", m["errors"])
@@ -254,6 +266,11 @@ with t_eval:
         k = ss.key
         st.subheader(f"2. Evaluate returns - Case {k.case_id}")
         mode = st.radio("How many returns?", ["One return", "Many returns at once (bulk)"], horizontal=True)
+        fmt_pick = st.radio("Returns are made on", [IRS_NAME, ATX_NAME, AUTO], horizontal=True,
+                            help="With 'IRS fillable forms', a printed or flattened PDF is reported as a failure "
+                                 "(ask the student to upload the saved fillable form) instead of being read as "
+                                 "an ATX printout.")
+        expect = None if fmt_pick == AUTO else fmt_pick
 
         if mode == "One return":
             pdfs = st.file_uploader("Student return: the complete ATX printout, or the filled-in IRS fillable "
@@ -277,7 +294,7 @@ with t_eval:
                 with st.spinner("Reading the return and marking it..."):
                     files = [(f.name, f.getvalue()) for f in pdfs]
                     try:
-                        res = evaluate_files(files, sid, sname, k)
+                        res = evaluate_files(files, sid, sname, k, expect)
                     except ReaderError as e:
                         st.error(str(e))
                         st.stop()
@@ -313,6 +330,10 @@ with t_eval:
                     st.rerun()
 
         else:
+            st.write("**OneDrive batch folder:** download the batch folder (it arrives as a zip) and upload the zip "
+                     "here - each student's folder `EmployeeID_" + k.case_id + "` is one return. Near-miss folder names "
+                     "(spaces, hyphens, missing mock code, ...) are still matched and marked **CHECK NAME**; folders "
+                     "with no PDF in them are listed as skipped.")
             st.write("Upload many PDFs at once, or zip files containing them. Name each student's file(s) "
                      "`StudentID_CaseID.pdf` (e.g. `S0123_" + k.case_id + ".pdf`). For IRS fillable forms, a student "
                      "can have several PDFs: `S0123_" + k.case_id + "_1040.pdf`, `S0123_" + k.case_id + "_SchC.pdf`, "
@@ -324,13 +345,14 @@ with t_eval:
                                     help="Lets you restart an interrupted upload without marking anything twice.")
             make_reports = c2.checkbox("Also create the PDF report for every student", value=True)
             if st.button("Evaluate all", type="primary", disabled=not files):
-                groups, skipped = group_uploads([(f.name, f.getvalue()) for f in files])
-                done = db.evaluated(k.case_id) if (db and skip_done) else set()
                 roster = {s_["student_id"]: s_ for s_ in db.students()} if db else {}
+                groups, skipped = group_uploads([(f.name, f.getvalue()) for f in files], case_id=k.case_id,
+                                                roster_ids=list(roster) or None)
+                done = db.evaluated(k.case_id) if (db and skip_done) else set()
                 out, zbuf = [], io.BytesIO()
                 for name, why in skipped:
                     out.append({"File": name, "Student ID": "", "Name": "", "Batch": "", "Score": None,
-                                "Out of": None, "%": None, "File-ready": "", "Errors": None, "Read as": "",
+                                "Out of": None, "Score /100": None, "File-ready": "", "Errors": None, "Read as": "",
                                 "Status": why if why.startswith("Skipped") else f"Skipped - {why}"})
                 bar = st.progress(0.0, text="Starting...")
                 with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as zout:
@@ -339,27 +361,32 @@ with t_eval:
                         sid = g.student_id
                         stud = roster.get(sid, {})
                         row = {"File": g.label[:200], "Student ID": sid, "Name": stud.get("name") or "",
-                               "Batch": stud.get("batch") or "", "Score": None, "Out of": None, "%": None,
-                               "File-ready": "", "Errors": None, "Read as": "", "Status": ""}
+                               "Batch": stud.get("batch") or "", "Score": None, "Out of": None, "Score /100": None,
+                               "File-ready": "", "Errors": None, "Read as": "", "Status": "", "Notes": ""}
+                        naming = ("; ".join(g.warnings) + ". ") if g.warnings else ""
+                        if roster and sid not in roster:
+                            naming += f"Student ID {sid} is not on the roster. "
                         if g.case_id != k.case_id.upper():
                             row["Status"] = f"Skipped - file is for case {g.case_id}"
                         elif sid in done:
                             row["Status"] = "Skipped - already evaluated"
                         else:
                             try:
-                                res = evaluate_files(g.load(), sid, row["Name"], k)
+                                res = evaluate_files(g.load(), sid, row["Name"], k, expect)
                                 save(sid, res)
                                 m = res["m"]
                                 warn = m["needs_review"] or res["notes"] or res["unlinked"]
-                                row.update({"Score": m["score"], "Out of": m["out_of"], "%": round(m["pct"] * 100, 1),
+                                row.update({"Score": m["score"], "Out of": m["out_of"], "Score /100": round(m["pct"] * 100, 1),
                                             "File-ready": "Yes" if m["file_ready"] else "No", "Errors": m["errors"],
                                             "Read as": res["format"],
-                                            "Status": "Evaluated" + (" - check 'What the system read'" if warn else "")})
+                                            "Status": "Evaluated" + (" - check 'What the system read'" if warn else "")
+                                            + (f" - CHECK NAME: {naming}" if naming else ""),
+                                            "Notes": " | ".join(res["notes"])[:300]})
                                 if make_reports:
                                     zout.writestr(report_name(sid, k.case_id), res["report"])
                                 done.add(sid)
                             except ReaderError as e:
-                                row["Status"] = f"Failed - {str(e)[:160]}"
+                                row["Status"] = f"Failed - {str(e)[:200]}" + (f" - CHECK NAME: {naming}" if naming else "")
                             except Exception as e:
                                 log.exception("bulk evaluation failed for %s", sid)
                                 row["Status"] = f"Failed - unexpected error ({type(e).__name__}); details logged"

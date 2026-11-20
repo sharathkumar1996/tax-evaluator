@@ -105,3 +105,28 @@ def test_template_cache_gives_same_result():
     a = IRSReturn([("a.pdf", d)]).all_fields()
     b = IRSReturn([("a.pdf", d)]).all_fields()          # second read uses the cached form layout
     assert a == b
+
+
+def test_printed_copy_does_not_replace_the_fillable_copy():
+    good = fill(BLANK, SAMPLE_TEXT, CHECKS)
+    printed = fill(BLANK, SAMPLE_TEXT, CHECKS, flatten=True)
+    r = read_return([("a_1040_printed.pdf", printed), ("z_1040.pdf", good)])     # printed one sorts first
+    assert r.forms_found() == ["1040"]
+    assert r.value("1040", "1a")[0] == 98500
+    assert any("not marked" in n for n in r.notes)
+
+
+def test_expect_irs_rejects_printed_pdfs():
+    printed = fill(BLANK, SAMPLE_TEXT, CHECKS, flatten=True)
+    with pytest.raises(ReaderError, match="fillable"):
+        read_return([("x.pdf", printed)], expect=IRS_NAME)
+
+
+def test_unsaved_blank_form_is_flagged():
+    r = read_return([("x.pdf", BLANK)], expect=IRS_NAME)
+    assert any("not saved" in n for n in r.notes)
+
+
+def test_damaged_pdf_message():
+    with pytest.raises(ReaderError, match="damaged"):
+        read_return([("folder/1040.pdf", b"%PDF-1.7 broken")], expect=IRS_NAME)

@@ -11,19 +11,19 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, Tabl
 
 from metrics import CRITICAL_TEXT
 
-NAVY = colors.HexColor("#1F3864")
-LIGHT = colors.HexColor("#F2F4F8")
-LINE = colors.HexColor("#D9DDE5")
-GREY = colors.HexColor("#595959")
+from brand import FONT, FONT_BOLD, GREY, LINE, MAROON, MAROON_LIGHT
+
+NAVY = MAROON
+LIGHT = MAROON_LIGHT
 ss = getSampleStyleSheet()
-H1 = ParagraphStyle("h1", parent=ss["Title"], fontName="Helvetica-Bold", fontSize=16, textColor=NAVY, alignment=0,
+H1 = ParagraphStyle("h1", parent=ss["Title"], fontName=FONT_BOLD, fontSize=16, textColor=NAVY, alignment=0,
                     spaceAfter=2)
-H2 = ParagraphStyle("h2", parent=ss["Heading2"], fontName="Helvetica-Bold", fontSize=11.5, textColor=NAVY,
+H2 = ParagraphStyle("h2", parent=ss["Heading2"], fontName=FONT_BOLD, fontSize=11.5, textColor=NAVY,
                     spaceBefore=10, spaceAfter=4)
-B = ParagraphStyle("b", parent=ss["BodyText"], fontName="Helvetica", fontSize=8.5, leading=11)
+B = ParagraphStyle("b", parent=ss["BodyText"], fontName=FONT, fontSize=8.5, leading=11)
 SM = ParagraphStyle("s", parent=B, fontSize=7.5, textColor=GREY)
 C = ParagraphStyle("c", parent=B, fontSize=7.8, leading=9.6)
-CH = ParagraphStyle("ch", parent=C, fontName="Helvetica-Bold", textColor=colors.white)
+CH = ParagraphStyle("ch", parent=C, fontName=FONT_BOLD, textColor=colors.white)
 
 
 def _pct(x):
@@ -55,7 +55,7 @@ def _table(df, widths=None):
 
 
 def _cards(items, width):
-    big = ParagraphStyle("big", parent=B, fontName="Helvetica-Bold", fontSize=17, leading=20, textColor=NAVY)
+    big = ParagraphStyle("big", parent=B, fontName=FONT_BOLD, fontSize=17, leading=20, textColor=NAVY)
     cells = [[Paragraph(v, big) for _, v in items], [Paragraph(k, SM) for k, _ in items]]
     t = Table(cells, colWidths=[width / len(items)] * len(items))
     t.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), LIGHT), ("LINEAFTER", (0, 0), (-2, -1), 2, colors.white),
@@ -66,7 +66,7 @@ def _cards(items, width):
 def _footer(institute, label):
     def f(canv, doc):
         canv.saveState()
-        canv.setFont("Helvetica", 7)
+        canv.setFont(FONT, 7)
         canv.setFillColor(GREY)
         canv.drawString(14 * mm, 8 * mm, f"{institute}  |  {label}  |  generated {datetime.now():%d %b %Y %H:%M}")
         canv.drawRightString(doc.pagesize[0] - 14 * mm, 8 * mm, f"Page {doc.page}")

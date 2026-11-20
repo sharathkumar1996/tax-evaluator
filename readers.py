@@ -21,6 +21,7 @@ from irs_reader import FORMAT_NAME as IRS_NAME
 from irs_reader import IRSReturn, ReaderError, has_form_fields
 
 ATX_NAME = "ATX printout"
+AUTO = "Detect automatically"
 MAX_FILE_MB = 25
 MAX_FILES_PER_RETURN = 40
 MAX_PAGES = 120
@@ -54,11 +55,37 @@ def _join_pdfs(files):
     return buf.getvalue()
 
 
-def read_return(files):
-    """files: list of (file name, bytes) belonging to ONE student's return."""
+def _opens(data):
+    try:
+        PdfReader(io.BytesIO(data)).pages[0]
+        return True
+    except Exception:
+        return False
+
+
+def read_return(files, expect=None):
+    """files: list of (file name, bytes) belonging to ONE student's return.
+    expect: IRS_NAME or ATX_NAME to insist on one format, None (or AUTO) to detect it from the files."""
     _check_limits(files)
-    if detect_format(files) == IRS_NAME:
+    try:
+        return _read(files, expect)
+    except ReaderError as e:
+        damaged = [n.split("/")[-1] for n, d in files if not _opens(d)]      # checked only when reading failed
+        if damaged:
+            raise ReaderError(f"{', '.join(damaged)}: the file is damaged or incomplete and cannot be opened. "
+                              "Ask the student to upload it again.") from e
+        raise
+
+
+def _read(files, expect):
+    if expect == IRS_NAME:
         return IRSReturn(files, max_pages=MAX_PAGES)
+    fmt = detect_format(files)
+    if fmt == IRS_NAME and expect in (None, AUTO):
+        return IRSReturn(files, max_pages=MAX_PAGES)
+    if expect == ATX_NAME and fmt == IRS_NAME:
+        raise ReaderError("These are IRS fillable forms, but this evaluation expects an ATX printout. "
+                          "Choose 'IRS fillable forms' as the return format.")
     try:
         data = files[0][1] if len(files) == 1 else _join_pdfs(files)
         ret = ReturnPDF(data)
