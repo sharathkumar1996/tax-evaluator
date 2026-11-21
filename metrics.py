@@ -1,23 +1,16 @@
 """
-metrics.py - management metrics.
+metrics.py - per-return figures saved with each evaluation (score, errors, items needing review),
+and rebuilding a return's marked rows from what the database stores.
 
-Per return
-  * File-ready      : no mistakes on any CRITICAL item (filing status, dependents' credit boxes,
-                      AGI, taxable income, total tax, total payments, refund, amount owed).
-  * Bottom-line     : the refund (1040 line 35a) and amount owed (line 37) both match the key.
-  * Errors          : number of items marked wrong + unexpected entries.
-Across returns these become the File-ready rate, Bottom-line accuracy and Average errors per return.
+The database still has file_ready / bottom_line / critical_errors columns from earlier versions;
+they are filled in so older copies of the app keep working, but nothing in the app shows them.
 """
 import re
-
-import pandas as pd
 
 from grader_core import norm_form, norm_line, summarise
 
 CRITICAL_1040_LINES = {"11", "15", "24", "33", "35a", "37"}
 BOTTOM_LINE = {"35a", "37"}
-CRITICAL_TEXT = ("Filing status, dependents' credit boxes, AGI (line 11), taxable income (15), total tax (24), "
-                 "total payments (33), refund (35a) and amount owed (37)")
 
 
 def is_critical(form, line):
@@ -79,58 +72,3 @@ def _from_stored(m):
             "Student Value": val(m["student_value"]), "Marks": m["marks"], "Awarded": m["awarded"],
             "Result": m["result"], "Feedback": m["feedback"] or "", "Note": m["note"] or "",
             "Needs Review": bool(m["needs_review"])}
-
-
-# ------------------------------------------------------------------ aggregates
-def headline(ev: pd.DataFrame, n_students=None, n_cases=None):
-    if ev.empty:
-        return {"returns": 0, "students": 0, "file_ready_rate": None, "bottom_line_accuracy": None,
-                "avg_errors": None, "avg_score": None, "expected": (n_students or 0) * (n_cases or 0)}
-    bl = ev["bottom_line"].dropna()
-    return {"returns": len(ev), "students": ev["student_id"].nunique(),
-            "file_ready_rate": ev["file_ready"].mean(),
-            "bottom_line_accuracy": bl.mean() if len(bl) else None,
-            "avg_errors": ev["errors"].mean(), "avg_score": ev["pct"].mean(),
-            "expected": (n_students or 0) * (n_cases or 0)}
-
-
-def group_table(ev: pd.DataFrame, by):
-    if ev.empty:
-        return pd.DataFrame()
-    g = ev.groupby(by, dropna=False)
-    out = pd.DataFrame({
-        "Students": g["student_id"].nunique(),
-        "Returns": g.size(),
-        "Avg score %": (g["pct"].mean() * 100).round(1),
-        "File-ready rate %": (g["file_ready"].mean() * 100).round(1),
-        "Bottom-line accuracy %": (g["bottom_line"].mean() * 100).round(1),
-        "Avg errors per return": g["errors"].mean().round(1),
-    }).reset_index()
-    return out
-
-
-def top_mistakes(ms: pd.DataFrame, ev: pd.DataFrame, n=15):
-    if ms.empty or ev.empty:
-        return pd.DataFrame()
-    ms = ms.merge(ev[["student_id", "case_id"]], on=["student_id", "case_id"])
-    ms = ms[ms["result"] != "Correct"]
-    per_case = ev.groupby("case_id").size().rename("returns")
-    t = (ms.groupby(["case_id", "form", "line", "description"]).size().rename("Students wrong").reset_index()
-         .merge(per_case, left_on="case_id", right_index=True))
-    t["% of returns"] = (t["Students wrong"] / t["returns"] * 100).round(1)
-    t = t.sort_values(["Students wrong", "% of returns"], ascending=False).head(n)
-    return t.rename(columns={"case_id": "Case", "form": "Form", "line": "Line", "description": "What was checked"}) \
-            .drop(columns=["returns"])
-
-
-def student_table(ev: pd.DataFrame):
-    if ev.empty:
-        return pd.DataFrame()
-    piv = ev.pivot_table(index=["student_id", "name", "batch"], columns="case_id", values="pct", aggfunc="first")
-    piv = (piv * 100).round(1)
-    g = ev.groupby(["student_id", "name", "batch"], dropna=False)
-    piv["Returns"] = g.size()
-    piv["Avg score %"] = (g["pct"].mean() * 100).round(1)
-    piv["File-ready rate %"] = (g["file_ready"].mean() * 100).round(1)
-    piv["Avg errors"] = g["errors"].mean().round(1)
-    return piv.reset_index().rename(columns={"student_id": "Student ID", "name": "Name", "batch": "Batch"})

@@ -19,7 +19,7 @@ This mapping depends only on the blank form, never on what the student typed, so
 same for every student. It is worked out once per form page and then cached, which also
 makes bulk evaluation fast (later returns need no text extraction at all).
 
-The class ``IRSReturn`` offers the same interface as ``grader_core.ReturnPDF`` (``value``,
+The class ``IRSReturn`` offers the interface the grader uses (``value``,
 ``all_fields``, ``forms_found``, ``page_map``, ``copies``) so grading, reports, metrics and
 the database are shared by both readers.
 """
@@ -918,7 +918,7 @@ class IRSReturn:
                 break
         return self._deps
 
-    # ---------------------------------------------------------------- lookups (same as ReturnPDF.value)
+    # ---------------------------------------------------------------- lookups
     def value(self, form, line):
         f, inst = norm_form(form)
         raw = str(line or "").strip()

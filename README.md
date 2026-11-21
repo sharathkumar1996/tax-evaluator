@@ -1,33 +1,32 @@
-# Tax Return Evaluator (ATX or IRS fillable forms → evaluation report)
+# Tax Return Evaluator (IRS fillable forms → evaluation report)
 
 Staff upload a case **answer key** (Excel) once, then upload student returns one at a time or in bulk.
-A return can be either
-- an **ATX printout** (the complete return printed to PDF from ATX), or
-- the **IRS fillable forms** (Form 1040, schedules and other forms from irs.gov, filled in and *saved*).
-  One PDF per form is fine.
+A return is the **IRS fillable forms** (Form 1040, schedules and other forms from irs.gov, filled in and
+*saved*). One PDF per form is fine. Printed or flattened PDFs are refused with advice to upload the saved form.
 
-The app recognises which kind each return is. The app checks every item in the key and produces a
-**PDF evaluation report** named `Evaluation_report_<StudentID>_<CaseID>.pdf`: overall score,
-marks by category, and every mistake (form + line, student entry, correct entry, marks lost, feedback).
+The app checks every item in the key and produces a Simandhar-branded **PDF evaluation report** named
+`Evaluation_report_<StudentID>_<CaseID>.pdf`: score out of 100, marks by category, and every mistake
+(form + line, student entry, correct entry, marks lost, feedback).
 
 Marking is strict: any difference from the key loses that item's marks. Amounts entered on lines
 that should be blank ("unexpected entries") can also deduct marks.
 
-Nothing is stored on the server. The key, returns and results exist only in the open browser tab.
+Student PDFs are never stored. With a database (see below) scores and mistakes are saved; without one,
+results exist only in the open browser tab.
 
 ## Files
 | File | Purpose |
 |---|---|
 | `app.py` | The Streamlit app |
-| `readers.py` | Chooses the reader for each return and checks file limits |
+| `readers.py` | Entry point for reading a return; checks file limits and damaged files |
 | `irs_reader.py` | Reads IRS fillable forms (the values stored in the form's boxes) |
-| `grader_core.py` | Reads ATX PDFs (1040 + schedules/forms) and marks returns against the key |
+| `grader_core.py` | Form/line names, loading the answer key, and marking a return against it |
 | `integrity.py`, `integrity_report.py` | Copying checks and the integrity report |
 | `bulk.py` | Groups a bulk upload (PDFs / zips) into one return per student, with zip safety limits |
 | `report_pdf.py` | Builds the student PDF report |
 | `db.py` | Saves students, batches, case keys, scores and mistakes (Neon Postgres) |
-| `metrics.py` | File-ready rate, bottom-line accuracy, average errors per return |
-| `mgmt_report.py` | Management PDF / Excel and the consolidated student report |
+| `metrics.py` | Per-return figures saved with each evaluation; rebuilding a saved report |
+| `pdf_common.py` | Shared branded PDF styles (used by the integrity report) |
 | `answer_key_template.xlsx` | Blank key for trainers (downloadable inside the app) |
 | `make_keys.py` | Template builder and the 'build key from a correct return' function |
 | `requirements.txt`, `.streamlit/config.toml` | Deployment settings |
@@ -63,8 +62,8 @@ Notes
 ## Saving results permanently (Neon database)
 
 Without a database the app works, but results disappear when the browser tab closes.
-With one, every evaluation is saved, and the **Management dashboard**, **Find a report** and
-**Students & batches** tabs become available.
+With one, every evaluation is saved, and the **Find a report**, **Students & batches**, **Integrity checks**
+and **Data management** tabs become available. (The **Management dashboard** tab is being rebuilt.)
 
 1. Create a free account at neon.com and a project (any name, region close to your users).
 2. On the project dashboard click **Connect** and copy the connection string. It looks like
@@ -88,7 +87,8 @@ connection string in the test app, so test data never mixes with real results.
 
 ## Going back to the previous version
 
-The branch `database` is the ATX-only version with the database; `stable-v1` is the version without a database. To go back, open the app's
+This branch (`irs-fillable`) reads IRS fillable forms only. The branch `database` is the older ATX version with the
+database; `stable-v1` is the version without a database. To go back, open the app's
 **Settings** in Streamlit and change the branch to `stable-v1`, or deploy a second app from it.
 Data already saved in Neon is not affected.
 
@@ -100,12 +100,12 @@ streamlit run app.py
 
 ## Writing answer keys
 Fastest: in the app, open **Build a key from a correct return** and upload the trainer's correct
-return (ATX printout or fillable forms). You get a workbook listing every filled-in item on every form. Set marks, categories and
+return (the saved fillable forms). You get a workbook listing every filled-in item on every form. Set marks, categories and
 feedback, then upload it as the key.
 
 Each row is Category, Form (`1040`, `Schedule C`, `Schedule SE`, `Form 8863`, `Schedule C #2` ...),
 Line, Correct Value, Marks, Tolerance and Feedback. Line can be:
-- a printed line number: `1`, `2b`, `25a`, `31` (lettered lines like Schedule C `B` work too)
+- a printed line number: `1a`, `2b`, `25a`, `31` (lettered lines like Schedule C `B` work too)
 - a column on a multi-column row: `1a (h)`, `8a (d)` on Schedule D (the column letter printed above the row)
 - a Form 1040 field: `FS`, `first_name`, `last_name`, `ssn`, `spouse_first_name`, `spouse_last_name`,
   `spouse_ssn`, `address`, `apt`, `city`, `state`, `zip`, `virtual_currency`, `occupation`,
@@ -117,7 +117,7 @@ Leave Correct Value blank when the box must be empty.
 
 ## Bulk evaluation
 Choose **Many returns at once (bulk)**, then upload several PDFs or zips. Name the files:
-- `StudentID_CaseID.pdf`: one PDF per student (ATX printout), or
+- `StudentID_CaseID.pdf`: one PDF per student, or
 - `StudentID_CaseID_<anything>.pdf`: several PDFs per student (e.g. `S0123_C03_1040.pdf`, `S0123_C03_SchC.pdf`), or
 - a folder `StudentID_CaseID` holding that student's PDFs (inside a zip).
 
@@ -138,7 +138,7 @@ letter on multi-column rows, `1a (h)`); text boxes are found by the label above 
 the label to their right. This link depends only on the blank form, so it is the same for every
 student, and it is cached, so bulk marking is fast.
 
-Answer keys use the same Line names as for ATX (see below). Keys are per tax year: the 2025 Form 1040
+Keys are per tax year: the 2025 Form 1040
 has lines such as `11a`, `11b` and `12e`. Build the key from the trainer's correct fillable return
 (**Build a key from a correct return**) to get the right line names. A filled-in box the reader
 cannot link to a line is listed under **What the system read**, and you can mark it with
@@ -159,9 +159,7 @@ and explains in plain words what links them. Evidence it looks for:
 | Same PDF save ID (only when the viewer changed it after the blank form was downloaded) | 90 |
 | Same created + saved time stamps, to the second, and same software | 70 |
 | Same unusual wrong answers on the same lines (rarer mistakes count more; common ones are ignored) | up to 70 |
-| Same original document ID (ATX printouts) | 60 |
 | Every box identical, including how numbers and names were typed | 50 |
-| Same computer user name in the file properties (ATX printouts) | 25 |
 | 0 typed in the same boxes others leave blank / identical capitalisation and spacing | 15 each |
 | Saved within 2 minutes of each other | 10 |
 
@@ -173,11 +171,9 @@ Summaries are batch-wise and student-wise, with a PDF and an Excel report.
 
 These are signals for a conversation, not proof: compare the two returns and hear the students before acting.
 Only returns evaluated with this version have file fingerprints; older results are compared on wrong answers only.
-What is stored: hashes, PDF save IDs and time stamps, the file name and, for ATX printouts, the computer user name
-in the file properties. The returns themselves are still not stored.
+What is stored: hashes, PDF save IDs and time stamps and the file name. The returns themselves are still not stored.
 
 ## Reliability
-- One reader per return format, behind one interface: marking, the database and all reports are shared.
 - Saving an evaluation, and every erase, is a single database transaction: saved completely or not at all.
 - Database connections come from a pool and are checked before use (Neon closes idle connections);
   a dropped connection is retried automatically.
@@ -188,8 +184,6 @@ in the file properties. The returns themselves are still not stored.
 - Limits on file size, pages and zip contents stop oversized uploads from crashing the app.
 
 ## Limits to know
-- ATX reader calibrated on **ATX 2020** output. A different ATX year or version: run one return through it and
-  check the "What the system read" panel.
 - Form tables with many rows (e.g. Form 8949 transaction lists) are checked through their numbered
   total lines, not row by row.
-- PDFs must be printed from ATX or saved from the fillable forms, not scanned.
+- PDFs must be the saved fillable forms: not printed, flattened or scanned.

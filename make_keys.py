@@ -1,4 +1,4 @@
-"""Answer-key workbooks: blank template, worked examples, and drafting a key from a correct ATX return."""
+"""Answer-key workbooks: blank template, worked examples, and drafting a key from a correct return (IRS fillable forms)."""
 import io
 
 from openpyxl import Workbook
@@ -19,7 +19,7 @@ WIDTHS = [6, 22, 13, 18, 40, 18, 8, 11, 70]
 HOW = [
     ("How to fill in an answer key", None),
     ("", None),
-    ("Quickest way", "In the app, use 'Build key from a correct return': upload the trainer's correct ATX return and you get "
+    ("Quickest way", "In the app, use 'Build key from a correct return': upload the trainer's correct return (the saved IRS fillable forms) and you get "
                      "this workbook with every filled-in item already listed. Then set Marks, Categories and Feedback."),
     ("One file = one case", "Fill in Case ID, Case Title, Tax Year and 'Marks deducted per unexpected entry' at the top."),
     ("Edit", "Only the yellow cells (blue text). Do not rename the sheet or the column headers."),
@@ -28,7 +28,7 @@ HOW = [
                  "Schedule C, Deductions, Tax & Credits, Payments & Refund."),
     ("Form", "Form or schedule as printed: 1040, Schedule 1, Schedule C, Schedule SE, Form 8863 ... "
              "For a second copy of the same schedule write 'Schedule C #2'."),
-    ("Line - numbered lines", "Line number exactly as printed: 1, 2b, 25a, 31. Lettered lines (e.g. Schedule C line B) also work."),
+    ("Line - numbered lines", "Line number exactly as printed on the fillable form: 1a, 2b, 25a, 31. Lettered lines (e.g. Schedule C line B) also work."),
     ("Line - Form 1040 fields", "FS (filing status), first_name, last_name, ssn, spouse_first_name, spouse_last_name, spouse_ssn, "
                                 "address, apt, city, state, zip, foreign_country, virtual_currency (Yes/No), occupation, "
                                 "spouse_occupation, you_as_dependent, spouse_as_dependent, you_born_before, you_blind, "
@@ -130,7 +130,7 @@ def _sort_key(fld):
 
 def draft_from_return(files, case_id, title, year, marks=1, unexpected=1):
     """Read every filled-in item from a CORRECT return and lay it out as an answer key.
-    files: PDF bytes (one ATX printout) or a list of (file name, bytes)."""
+    files: a list of (file name, bytes) - the saved fillable forms."""
     from readers import read_return
     if isinstance(files, (bytes, bytearray)):
         files = [("return.pdf", bytes(files))]
@@ -149,8 +149,8 @@ def draft_from_return(files, case_id, title, year, marks=1, unexpected=1):
 
 
 if __name__ == "__main__":
-    build("C00", "Case title here", 2020,
-          [(1, "Income", "1040", "1", "Wages, salaries, tips", 48000, 5, 1,
-            "EXAMPLE ROW - replace. Line 1 is W-2 box 1 wages.")], unexpected=1, blank_rows=59,
+    build("C00", "Case title here", 2025,
+          [(1, "Income", "1040", "1a", "Total amount from Form(s) W-2, box 1", 48000, 5, 1,
+            "EXAMPLE ROW - replace. Line 1a is W-2 box 1 wages.")], unexpected=1, blank_rows=59,
           path="answer_key_template.xlsx")
     print("template built")

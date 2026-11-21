@@ -68,7 +68,7 @@ def _lineref(r):
 
 
 def build_report(student_name, student_id, key, rows, cats, total, out_of, file_name, institute,
-                 evaluated_on=None, status_line=None):
+                 evaluated_on=None):
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=14 * mm, rightMargin=14 * mm,
                             topMargin=14 * mm, bottomMargin=16 * mm,
@@ -103,8 +103,8 @@ def build_report(student_name, student_id, key, rows, cats, total, out_of, file_
     score = Table([[Paragraph(f"{s100:g} / 100", big),
                     Paragraph(f"<b>{total:g} of {out_of:g} marks</b> (scaled to 100)<br/>"
                               f"<font color='#2E7D4F'>{n_ok} correct</font> &nbsp; "
-                              f"<font color='#C0392B'>{n_bad} wrong</font> &nbsp; of {n_keyed} items checked{extra}"
-                              + (f"<br/>{status_line}" if status_line else ""), BODY)]],
+                              f"<font color='#C0392B'>{n_bad} wrong</font> &nbsp; of {n_keyed} items checked{extra}",
+                              BODY)]],
                   colWidths=[45 * mm, W - 45 * mm])
     score.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), LIGHT), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
                                ("LINEBEFORE", (0, 0), (0, -1), 3, MAROON),

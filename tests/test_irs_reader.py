@@ -3,7 +3,7 @@ import pytest
 
 from helpers import BLANK_1040, SAMPLE_TEXT, fill
 from irs_reader import IRSReturn, ReaderError
-from readers import ATX_NAME, IRS_NAME, detect_format, read_return
+from readers import IRS_NAME, read_return
 
 BLANK = BLANK_1040.read_bytes()
 CHECKS = {"c1_8": 1, "c1_28": 0, "c1_10": 1, "c2_6": 0}      # MFJ, dep 1 CTC, digital assets No, you blind
@@ -74,9 +74,9 @@ def test_single_filing_status():
 
 def test_flattened_pdf_is_rejected_with_advice():
     flat = fill(BLANK, SAMPLE_TEXT, CHECKS, flatten=True)
-    assert detect_format([("x.pdf", flat)]) == ATX_NAME          # no boxes left -> not a fillable return
-    with pytest.raises(ReaderError, match="fillable"):
-        IRSReturn([("x.pdf", flat)])
+    for reader in (IRSReturn, read_return):                   # no boxes left -> refused, with advice
+        with pytest.raises(ReaderError, match="fillable"):
+            reader([("x.pdf", flat)])
 
 
 def test_duplicate_upload_is_ignored():
@@ -116,17 +116,17 @@ def test_printed_copy_does_not_replace_the_fillable_copy():
     assert any("not marked" in n for n in r.notes)
 
 
-def test_expect_irs_rejects_printed_pdfs():
+def test_printed_pdfs_are_rejected():
     printed = fill(BLANK, SAMPLE_TEXT, CHECKS, flatten=True)
     with pytest.raises(ReaderError, match="fillable"):
-        read_return([("x.pdf", printed)], expect=IRS_NAME)
+        read_return([("x.pdf", printed)])
 
 
 def test_unsaved_blank_form_is_flagged():
-    r = read_return([("x.pdf", BLANK)], expect=IRS_NAME)
+    r = read_return([("x.pdf", BLANK)])
     assert any("not saved" in n for n in r.notes)
 
 
 def test_damaged_pdf_message():
     with pytest.raises(ReaderError, match="damaged"):
-        read_return([("folder/1040.pdf", b"%PDF-1.7 broken")], expect=IRS_NAME)
+        read_return([("folder/1040.pdf", b"%PDF-1.7 broken")])

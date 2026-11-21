@@ -8,7 +8,7 @@ from reportlab.lib.units import mm
 from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer
 
 from integrity import LEVELS, SIGNALS
-from mgmt_report import H1, H2, SM, B, _cards, _esc, _footer, _table
+from pdf_common import H1, H2, SM, B, _cards, _esc, _footer, _table
 
 CAUTION = ("These are signals for a conversation, not proof. Before any action, open both returns, compare the "
            "evidence listed, and hear the students. Students in the same lab may legitimately share a computer "

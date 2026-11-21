@@ -19,9 +19,10 @@ File evidence - survives renaming the file and changing the student ID:
   * save_id / xmp_instance
                 the internal ID a PDF viewer writes when it saves; only used when the viewer
                 changed it after the blank form was downloaded
-  * doc_id      the original document ID of an ATX printout (each print gets a new one)
+  * doc_id      the original document ID of a printed PDF (only in returns marked before
+                printed PDFs were refused)
   * meta        identical created + saved time stamps (to the second) and software
-  * author      the computer user name in the file properties (ATX printouts)
+  * author      the computer user name in the file properties (printed PDFs, as above)
   * saved_at    saved within 2 minutes of each other (weak - could be the same lab session)
 Answer evidence:
   * shared wrong answers: the same WRONG value on the same line. Weighted by rarity: a mistake

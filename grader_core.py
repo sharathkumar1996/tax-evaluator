@@ -1,38 +1,23 @@
 """
-grader_core.py - reads an ATX return PDF (Form 1040 + any schedules/forms) and
-grades it against an Excel answer key.
+grader_core.py - shared building blocks: form and line names, the Excel answer key,
+and grading a return against it.
 
-Reading a return
-----------------
-* Each page is assigned to a form from its header text:
-  "SCHEDULE C (Form 1040)" -> SCH C,  "Form 8863" -> 8863,  1040 pages -> 1040.
-  A page whose header says "Page 2" etc. continues the previous copy of that form;
-  otherwise it starts a new copy (so a second Schedule C is "SCH C #2").
-* On a form's pages, a line is found by its bold line number (e.g. "31", "2b", "25a").
-  The student's figure is the filled-in amount immediately to its right on the
-  same row. ATX prints filled-in data at ~8.8pt; the form's own text is smaller,
-  which separates student entries from printed form text.
-* A blank box reads as 0. A form that is not in the PDF reads as "missing".
-* Named Form 1040 fields (names, SSNs, address, checkboxes, dependents) and any
-  "text: <printed label>" / "check: <printed label>" field are read from the box
-  under/next to the printed label.
+* The return itself is read by irs_reader.IRSReturn (IRS fillable forms); grade() only
+  needs its value(form, line) and all_fields() methods.
+* A blank box reads as 0. A form that is not in the upload reads as "missing".
 * Grading is strict: a figure either matches the key (within the rounding tolerance) or
   loses the step's marks. Optional: entries on lines the key says nothing about
   ("unexpected entries") can each deduct marks.
 """
 import io
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
-import pdfplumber
 from openpyxl import load_workbook
 
 # ------------------------------------------------------------------ settings
-DATA_MIN_SIZE = 8.3      # pt: ATX filled-in data is ~8.78pt, form text <= ~8pt
-ROW_TOL = 6              # pt: amount may sit a few points above/below its label
 HEADER_FRACTION = 0.16   # top part of the page used to identify the form
 
-MONEY = re.compile(r"^\(?-?\$?\d{1,3}(,\d{3})*\)?$|^\(?-?\$?\d+\)?$")
 LABEL = re.compile(r"^\d{1,3}[a-z]{0,2}$")
 
 FILING_STATUS = {
@@ -92,144 +77,9 @@ def _identify(page):
     return None, False
 
 
-# ------------------------------------------------------------- tokenising
-def _tokens(page):
-    """Split a page into tokens: bold line numbers vs regular text/amounts.
-    Spaces and dot leaders are dropped; a change of boldness starts a new token."""
-    chars = [c for c in page.chars if c["text"].strip() and c["text"] != "\u00a0"
-             and not (c["text"] == "." and c["size"] < DATA_MIN_SIZE)]      # drop dot leaders, keep decimals
-    chars.sort(key=lambda c: (round(c["top"]), c["x0"]))
-    toks = []
-    for c in chars:
-        bold = "Bold" in c["fontname"] or "Black" in c["fontname"]
-        t = toks[-1] if toks else None
-        if (t and abs(t["top"] - c["top"]) <= 1.5 and -0.5 <= c["x0"] - t["x1"] <= 2.5
-                and t["bold"] == bold):
-            t["text"] += c["text"]
-            t["x1"] = c["x1"]
-            t["size"] = max(t["size"], c["size"])
-        else:
-            toks.append({"text": c["text"], "x0": c["x0"], "x1": c["x1"], "top": c["top"],
-                         "bottom": c["bottom"], "bold": bold, "size": c["size"]})
-    for t in toks:
-        t["cy"] = (t["top"] + t["bottom"]) / 2
-    return toks
-
-
-def _to_number(tok):
-    t = tok.replace("$", "").replace(",", "")
-    neg = t.startswith("(") or t.startswith("-")
-    t = t.strip("()-")
-    try:
-        v = float(t)
-    except ValueError:
-        return None
-    return -v if neg else v
-
-
-def _filing_status(page):
-    words = sorted(page.extract_words(x_tolerance=1.5), key=lambda w: (w["top"], w["x0"]))
-    rows = []
-    for w in words:
-        if rows and abs(rows[-1][0]["top"] - w["top"]) <= 3:
-            rows[-1].append(w)
-        else:
-            rows.append([w])
-    for ws in rows:
-        ws.sort(key=lambda w: w["x0"])
-        text = " ".join(w["text"] for w in ws)
-        if "Single" not in text and "Filing Status" not in text:
-            continue
-        for x in [w for w in ws if w["text"] in ("X", "x", "✓", "✔")]:
-            nxt = " ".join(w["text"] for w in ws if w["x0"] > x["x1"])[:40].lower()
-            for label, code in FILING_STATUS.items():
-                if len(label) > 3 and nxt.startswith(label):
-                    return code
-    return None
-
-
-# ---------------------------------------------------------------- reader
+# ------------------------------------------------------------ text helpers
 def _norm_txt(t):
     return re.sub(r"[^a-z0-9]", "", str(t).lower())
-
-
-class _PageText:
-    """Printed form text (small font) as rows of characters, plus filled-in data words (ATX ~8.8pt)."""
-
-    def __init__(self, page):
-        self.width = page.width
-        chars = [c for c in page.chars if c["size"] < DATA_MIN_SIZE and c["text"].strip()]
-        chars.sort(key=lambda c: (round(c["top"]), c["x0"]))
-        self.rows = []
-        for c in chars:
-            if self.rows and abs(self.rows[-1][0]["top"] - c["top"]) <= 2.5:
-                self.rows[-1].append(c)
-            else:
-                self.rows.append([c])
-        for r in self.rows:
-            r.sort(key=lambda c: c["x0"])
-        self.norm = ["".join(_norm_txt(c["text"]) for c in r) for r in self.rows]
-        self.idx = [[i for i, c in enumerate(r) for _ in _norm_txt(c["text"])] for r in self.rows]
-        words = page.extract_words(x_tolerance=1.5, keep_blank_chars=True, extra_attrs=["size", "fontname"])
-        self.data = [w for w in words if w["size"] >= DATA_MIN_SIZE and "Bold" not in w["fontname"]
-                     and w["text"].strip()]
-        for w in self.data:
-            w["text"] = w["text"].strip()
-            w["cy"] = (w["top"] + w["bottom"]) / 2
-
-    def find(self, phrase, near=None):
-        """All boxes (x0, x1, top, bottom) where the printed phrase occurs; optional 'near' text on the same row."""
-        p = _norm_txt(phrase)
-        out = []
-        if not p:
-            return out
-        for ri, rn in enumerate(self.norm):
-            if near:
-                ctx = "".join(self.norm[j] for j in range(len(self.rows))
-                              if abs(self.rows[j][0]["top"] - self.rows[ri][0]["top"]) <= 6)
-                if _norm_txt(near) not in ctx:
-                    continue
-            start = rn.find(p)
-            while start >= 0:
-                r = self.rows[ri]
-                a, b = r[self.idx[ri][start]], r[self.idx[ri][start + len(p) - 1]]
-                out.append({"x0": a["x0"], "x1": b["x1"], "top": min(a["top"], b["top"]),
-                            "bottom": max(a["bottom"], b["bottom"]), "row": ri})
-                start = rn.find(p, start + 1)
-        return out
-
-    def _next_label_x(self, box):
-        """x where the next printed label starts to the right on the same row (box boundary)."""
-        r = self.rows[box["row"]]
-        gaps = [c["x0"] for i, c in enumerate(r) if c["x0"] > box["x1"] + 6
-                and (i == 0 or c["x0"] - r[i - 1]["x1"] > 6)]
-        return min(gaps, default=self.width)
-
-    def text_under(self, phrase, near=None):
-        boxes = self.find(phrase, near)
-        if not boxes:
-            return None
-        b = boxes[0]
-        right = self._next_label_x(b)
-        got = [w for w in self.data if b["bottom"] - 1 <= w["top"] <= b["bottom"] + 16
-               and b["x0"] - 4 <= w["x0"] < right - 4]
-        if not got:   # value printed on the same row, to the right of the label
-            got = [w for w in self.data if abs(w["cy"] - (b["top"] + b["bottom"]) / 2) <= 5
-                   and b["x1"] < w["x0"] < right]
-        got.sort(key=lambda w: w["x0"])
-        return " ".join(w["text"] for w in got)
-
-    def checked(self, phrase, near=None):
-        boxes = self.find(phrase, near)
-        if not boxes:
-            return None
-        for b in boxes:
-            cy = (b["top"] + b["bottom"]) / 2
-            for w in self.data:
-                if w["text"] in ("X", "x", "✓", "✔") and abs(w["cy"] - cy) <= 5 \
-                        and b["x0"] - 18 <= w["x1"] <= b["x0"] + 1:
-                    return True
-        return False
 
 
 # Named fields on Form 1040 that are not numbered lines -> how to read them
@@ -258,264 +108,6 @@ F1040_FIELDS = {
 }
 DEP_FIELDS = ("name", "ssn", "relationship", "ctc", "odc")
 FIELD_CATEGORY = {"fs": "Filing Status", "dep": "Dependents"}
-
-
-@dataclass
-class FormCopy:
-    form: str
-    instance: int
-    pages: list = field(default_factory=list)      # page numbers (1-based)
-    tokens: list = field(default_factory=list)     # per page token lists
-    texts: list = field(default_factory=list)      # per page _PageText
-
-
-class ReturnPDF:
-    format_name = "ATX printout"
-
-    def __init__(self, data: bytes):
-        self.notes = []            # messages for staff (same interface as irs_reader.IRSReturn)
-        self.copies = {}           # (form, instance) -> FormCopy
-        self.page_map = []         # [(page_no, form label)]
-        self.filing_status = None
-        self._deps = None
-        with pdfplumber.open(io.BytesIO(data)) as pdf:
-            self.n_pages = len(pdf.pages)
-            counts, last = {}, None
-            for i, page in enumerate(pdf.pages, 1):
-                form, cont = _identify(page)
-                if form is None:
-                    self.page_map.append((i, "(not a graded form)"))
-                    last = None
-                    continue
-                if cont and last and last.form == form:
-                    copy = last
-                else:
-                    counts[form] = counts.get(form, 0) + 1
-                    copy = FormCopy(form, counts[form])
-                    self.copies[(form, copy.instance)] = copy
-                copy.pages.append(i)
-                copy.tokens.append(_tokens(page))
-                copy.texts.append(_PageText(page))
-                last = copy
-                lab = form if copy.instance == 1 else f"{form} #{copy.instance}"
-                self.page_map.append((i, lab))
-                if form == "1040" and self.filing_status is None:
-                    self.filing_status = _filing_status(page)
-
-    def forms_found(self):
-        return sorted({f if i == 1 else f"{f} #{i}" for (f, i) in self.copies})
-
-    def unlinked(self):
-        return []
-
-    # ---- dependents table on Form 1040 page 1
-    def dependents(self):
-        if self._deps is not None:
-            return self._deps
-        self._deps = []
-        c = self.copies.get(("1040", 1))
-        if not c:
-            return self._deps
-        pt = c.texts[0]
-        try:
-            name = pt.find("(1) First name")[0]
-            ssn = pt.find("(2) Social security")[0]
-            rel = pt.find("(3) Relationship")[0]
-            ctc = pt.find("Child tax credit")[0]
-            odc = pt.find("Credit for other dependents")[0]
-        except IndexError:
-            return self._deps
-        line1 = [t for t in c.tokens[0] if t["bold"] and t["text"] == "1" and t["x0"] > 0.6 * pt.width]
-        y0 = max(name["bottom"], ctc["bottom"], odc["bottom"]) + 1
-        y1 = line1[0]["top"] - 4 if line1 else y0 + 60
-        words = sorted([w for w in pt.data if y0 <= w["top"] <= y1], key=lambda w: (w["top"], w["x0"]))
-        rows = []
-        for w in words:
-            if rows and abs(rows[-1][0]["top"] - w["top"]) <= 4:
-                rows[-1].append(w)
-            else:
-                rows.append([w])
-        for r in rows:
-            pick = lambda a, b: " ".join(w["text"] for w in sorted(r, key=lambda w: w["x0"]) if a <= w["x0"] < b)
-            is_x = lambda a, b: any(w["text"] in ("X", "x", "✓", "✔") and a <= w["x0"] < b for w in r)
-            self._deps.append({
-                "name": pick(name["x0"] - 6, ssn["x0"] - 6), "ssn": pick(ssn["x0"] - 6, rel["x0"] - 6),
-                "relationship": pick(rel["x0"] - 6, min(ctc["x0"], odc["x0"]) - 14),
-                "ctc": "Checked" if is_x(ctc["x0"] - 16, odc["x0"] - 16) else "Unchecked",
-                "odc": "Checked" if is_x(odc["x0"] - 16, pt.width) else "Unchecked"})
-        return self._deps
-
-    # ---- numbered line lookup
-    @staticmethod
-    def _col_x(toks, lab, col):
-        """x-centre of a column heading such as '(h)' or 'A' printed above the row."""
-        want = col.lower().strip("()")
-        heads = [t for t in toks if t["text"].lower().strip("()") == want and t["text"].strip("()") != t["text"] or
-                 (t["text"].lower() == want and len(want) == 1 and t["size"] < DATA_MIN_SIZE)]
-        heads = [t for t in heads if 0 < lab["top"] - t["top"] < 260]
-        if not heads:
-            return None
-        h = min(heads, key=lambda t: lab["top"] - t["top"])
-        return (h["x0"] + h["x1"]) / 2
-
-    def _line(self, copy, ln):
-        """(value, printed) for a numbered/lettered line on a form copy; (None, False) if no such line.
-        ln may name a column: '1a (h)' or '3 (A)'."""
-        col = None
-        m = re.match(r"^(.+?)\s*\(([a-z])\)$", ln)
-        if m:
-            ln, col = m.group(1).strip(), m.group(2)
-        best = None
-        for toks in copy.tokens:
-            for lab in [t for t in toks if t["bold"] and t["text"].lower() == ln]:
-                row_labels = [t for t in toks if t["bold"] and LABEL.match(t["text"].lower())
-                              and abs(t["cy"] - lab["cy"]) <= ROW_TOL and t["x0"] > lab["x1"] + 1]
-                stop = min([t["x0"] for t in row_labels], default=1e9)
-                data = [t for t in toks if not t["bold"] and t["size"] >= DATA_MIN_SIZE
-                        and lab["x1"] < t["x0"] < stop and abs(t["cy"] - lab["cy"]) <= ROW_TOL]
-                amts = [t for t in data if MONEY.match(t["text"])]
-                if col:
-                    cx = self._col_x(toks, lab, col)
-                    if cx is None:
-                        continue
-                    amts = [t for t in amts if abs((t["x0"] + t["x1"]) / 2 - cx) < 45 or t["x0"] - 6 <= cx <= t["x1"] + 6]
-                    data = amts
-                if amts:
-                    pick = min(amts, key=lambda t: t["x0"]) if not col else \
-                        min(amts, key=lambda t: abs((t["x0"] + t["x1"]) / 2 - cx))
-                    score, v, printed = 3 + lab["x0"] / 1000, _to_number(pick["text"]), True
-                elif data:
-                    data.sort(key=lambda t: t["x0"])
-                    score, v, printed = 2 + lab["x0"] / 1000, " ".join(t["text"] for t in data), True
-                else:
-                    score, v, printed = 1 + lab["x0"] / 1000, 0.0, False
-                if best is None or score > best[0]:
-                    best = (score, v, printed)
-        return (None, False) if best is None else (best[1], best[2])
-
-    def value(self, form, line):
-        """Return (value, note). value None = could not read / form missing."""
-        f, inst = norm_form(form)
-        raw = str(line or "").strip()
-        ln = norm_line(raw)
-        copy = self.copies.get((f, inst))
-        name = f if inst == 1 else f"{f} #{inst}"
-        if copy is None:
-            return None, f"{name} not found in the return"
-        if f == "1040" and ln in ("fs", "filing status", "filing_status"):
-            return (self.filing_status, "") if self.filing_status else (None, "Filing status box not read")
-        m = re.match(r"^dep(\d)_(\w+)$", ln)
-        if f == "1040" and m and m.group(2) in DEP_FIELDS:
-            deps = self.dependents()
-            i = int(m.group(1)) - 1
-            if i >= len(deps):
-                return ("Unchecked" if m.group(2) in ("ctc", "odc") else ""), ""
-            return deps[i][m.group(2)], ""
-        if f == "1040" and ln in F1040_FIELDS:
-            kind, pg, phrase, near = F1040_FIELDS[ln]
-            if pg > len(copy.texts):
-                return None, f"Page {pg} of Form 1040 not found"
-            pt = copy.texts[pg - 1]
-            if kind == "text":
-                v = pt.text_under(phrase, near)
-            elif kind == "check":
-                c = pt.checked(phrase, near)
-                v = None if c is None else ("Checked" if c else "Unchecked")
-            else:
-                y, n = pt.checked("Yes", phrase), pt.checked("No", phrase)
-                v = None if y is None and n is None else ("Yes" if y else "No" if n else "")
-            return (v, "") if v is not None else (None, f"'{phrase}' not found on Form 1040")
-        m = re.match(r"^(text|check):\s*(.+?)(?:\s*\|\s*near:\s*(.+))?$", raw, re.I)
-        if m:
-            kind, phrase, near = m.group(1).lower(), m.group(2), m.group(3)
-            for pt in copy.texts:
-                if kind == "text":
-                    v = pt.text_under(phrase, near)
-                else:
-                    c = pt.checked(phrase, near)
-                    v = None if c is None else ("Checked" if c else "Unchecked")
-                if v is not None:
-                    return v, ""
-            return None, f"'{phrase}' not found on {name}"
-        v, _ = self._line(copy, ln)
-        if v is None:
-            return None, f"Line {ln} not found on {name}"
-        return v, ""
-
-    # ---- everything filled in (used to draft keys and to catch unexpected entries)
-    def all_fields(self):
-        out = []
-        for (f, inst), copy in self.copies.items():
-            fname = f if inst == 1 else f"{f} #{inst}"
-            if f == "1040" and inst == 1:
-                if self.filing_status:
-                    out.append({"form": fname, "line": "FS", "desc": "Filing status", "value": self.filing_status})
-                for key in F1040_FIELDS:
-                    v, _ = self.value("1040", key)
-                    if v not in (None, "", "Unchecked"):
-                        out.append({"form": fname, "line": key, "desc": key.replace("_", " ").capitalize(), "value": v})
-                for i, d in enumerate(self.dependents(), 1):
-                    for k_ in DEP_FIELDS:
-                        out.append({"form": fname, "line": f"dep{i}_{k_}", "desc": f"Dependent {i} {k_}",
-                                    "value": d[k_]})
-            seen = set()
-            for pi, toks in enumerate(copy.tokens):
-                pt = copy.texts[pi]
-                for lab in toks:
-                    ln = lab["text"].lower()
-                    if not lab["bold"] or not LABEL.match(ln) or ln in seen:
-                        continue
-                    seen.add(ln)
-                    cols = self._row_columns(toks, lab)
-                    if cols:
-                        for cname in cols:
-                            v, printed = self._line(copy, f"{ln} ({cname})")
-                            if printed:
-                                out.append({"form": fname, "line": f"{lab['text']} ({cname})", "value": v, "desc": ""})
-                        continue
-                    v, printed = self._line(copy, ln)
-                    if not printed:
-                        continue
-                    out.append({"form": fname, "line": lab["text"], "value": v,
-                                "desc": self._describe(pt, lab)})
-        return out
-
-    def _row_columns(self, toks, lab):
-        """Column headings for a row that carries 2+ amounts (e.g. Schedule D 1a: d, e, g, h)."""
-        row_labels = [t for t in toks if t["bold"] and LABEL.match(t["text"].lower())
-                      and abs(t["cy"] - lab["cy"]) <= ROW_TOL and t["x0"] > lab["x1"] + 1]
-        stop = min([t["x0"] for t in row_labels], default=1e9)
-        amts = [t for t in toks if not t["bold"] and t["size"] >= DATA_MIN_SIZE and MONEY.match(t["text"])
-                and lab["x1"] < t["x0"] < stop and abs(t["cy"] - lab["cy"]) <= ROW_TOL]
-        if len(amts) < 2:
-            return []
-        heads = [t for t in toks if re.fullmatch(r"\([a-z]\)", t["text"]) and 0 < lab["top"] - t["top"] < 260]
-        names = []
-        for a in amts:
-            ac = (a["x0"] + a["x1"]) / 2
-            near = [h for h in heads if abs((h["x0"] + h["x1"]) / 2 - ac) < 45]
-            if near:
-                h = min(near, key=lambda h: (lab["top"] - h["top"]) + abs((h["x0"] + h["x1"]) / 2 - ac))
-                names.append(h["text"].strip("()"))
-        return list(dict.fromkeys(names))
-
-    @staticmethod
-    def _describe(pt, lab):
-        cy = (lab["top"] + lab["bottom"]) / 2
-        best = []
-        for r in pt.rows:
-            if abs((r[0]["top"] + r[0]["bottom"]) / 2 - cy) <= 4:
-                best += [c for c in r if c["x1"] < lab["x0"] - 2]
-        best.sort(key=lambda c: c["x0"])
-        txt, prev = "", None
-        for c in best:
-            if prev is not None and c["x0"] - prev > 1.2:
-                txt += " "
-            txt += c["text"]
-            prev = c["x1"]
-        txt = re.sub(r"(\s*\.\s*){2,}", " ", txt)
-        txt = re.sub(r"^\s*\d{1,2}[a-z]?\s+", "", txt).strip(" .")
-        return txt[:70]
 
 
 # ------------------------------------------------------------ answer key
@@ -712,7 +304,7 @@ def _match(student, correct, tol):
     return _clean_text(c) == _clean_text(s)
 
 
-def grade(ret: ReturnPDF, key: AnswerKey):
+def grade(ret, key: AnswerKey):
     rows = []
     for s in key.steps:
         val, note = ret.value(s["Form"], s["Line"])

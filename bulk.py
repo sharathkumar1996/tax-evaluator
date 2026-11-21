@@ -2,7 +2,7 @@
 bulk.py - turns a bulk upload (PDFs and/or zip files) into one group of files per student.
 
 Accepted layouts (any mix):
-  S0123_C03.pdf                      one PDF per student (ATX printout, or merged forms)
+  S0123_C03.pdf                      one PDF per student
   S0123_C03_1040.pdf, S0123_C03_SchC.pdf
                                      several PDFs per student: StudentID_CaseID_<anything>.pdf
   S0123_C03/1040.pdf, S0123_C03/SchC.pdf
