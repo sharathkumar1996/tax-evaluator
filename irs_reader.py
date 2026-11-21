@@ -97,6 +97,10 @@ class Widget:
     def cy(self):
         return (self.top + self.bottom) / 2
 
+    @property
+    def cx(self):
+        return (self.x0 + self.x1) / 2
+
 
 def _widgets(page):
     """All data widgets on a pypdf page, with their current values."""
@@ -314,7 +318,68 @@ def _build_template(plpage, widgets):
         _map_lists(t, widgets, words, labels)
         _map_checks(t, widgets, words, labels)
         _map_header(t, widgets, words)
+    if t.form == "8949":
+        _map_8949(t, widgets, words)
+    for ln, d in FIXED_DESC.get(t.form, {}).items():             # clearer than the wrapped printed text
+        t.desc[ln] = d
     return t
+
+
+FIXED_DESC = {"SCH SE": {
+    "A": "Minister / Form 4361 filer with other SE income (check box)",
+    "1a": "Net farm profit or (loss)", "1b": "Conservation Reserve Program payments",
+    "2": "Net profit or (loss) from Schedule C / K-1", "3": "Combine lines 1a, 1b and 2",
+    "4a": "Line 3 x 92.35%", "4b": "Optional methods (lines 15 + 17)", "4c": "Combine lines 4a and 4b",
+    "5a": "Church employee income", "5b": "Line 5a x 92.35%", "6": "Add lines 4c and 5b",
+    "8a": "Social security wages and tips", "8b": "Unreported tips (Form 4137)",
+    "8c": "Wages subject to social security tax (Form 8919)", "8d": "Add lines 8a, 8b and 8c",
+    "9": "Line 7 minus line 8d", "10": "Social security portion (12.4%)", "11": "Medicare portion (2.9%)",
+    "12": "Self-employment tax", "13": "Deduction for one-half of self-employment tax",
+    "15": "Farm optional method", "16": "Line 14 minus line 15", "17": "Nonfarm optional method"}}
+
+
+F8949_COLS = "abcdefgh"
+F8949_DESC = {"a": "description of property", "b": "date acquired", "c": "date sold", "d": "proceeds",
+              "e": "cost or other basis", "f": "adjustment code", "g": "adjustment amount", "h": "gain or (loss)"}
+
+
+def _map_8949(t, widgets, words):
+    """Form 8949: page 1 is Part I (short-term), page 2 Part II (long-term). Each part has
+    - the box to tick:            'I box' = A, B, C, G, H or I       'II box' = D, E, F, J, K or L
+    - transaction rows (line 1):  'I 1 row 3 (d)' = Part I, row 3, column (d) proceeds
+    - totals (line 2):            'I 2 (h)' = Part I total of column (h) gain or (loss)"""
+    part = "II" if any("Part2" in wd.name for wd in widgets) or t.cont else "I"
+    rows, rest = {}, []
+    for wd in widgets:
+        m = re.search(r"Table_Line1_Part\d.*?Row(\d+)", wd.name)
+        if m and wd.kind != "check":
+            rows.setdefault(int(m.group(1)), []).append(wd)
+        else:
+            rest.append(wd)
+    if not rows:
+        return
+    first = sorted(rows[min(rows)], key=lambda w: w.x0)
+    cols = list(zip(F8949_COLS, first))                              # columns (a)-(h) from the first row
+    for n, ws in rows.items():
+        for wd in ws:
+            c = min(cols, key=lambda cw: abs((cw[1].x0 + cw[1].x1) / 2 - wd.cx))[0]
+            t.lines[wd.key] = f"{part} 1 row {n} ({c})"
+    bottom = max(w.bottom for ws in rows.values() for w in ws)
+    for wd in rest:
+        if wd.kind == "text" and wd.top >= bottom - 1:                # line 2 totals, under the table
+            c = min(cols, key=lambda cw: abs((cw[1].x0 + cw[1].x1) / 2 - wd.cx))[0]
+            t.lines[wd.key] = f"{part} 2 ({c})"
+        elif wd.kind == "check":
+            near = [w for w in words if abs(w["cy"] - wd.cy) <= 5 and wd.x1 - 1 <= w["x0"] <= wd.x1 + 16]
+            letter = next((re.sub(r"[()]", "", w["text"]) for w in sorted(near, key=lambda w: w["x0"])
+                           if re.fullmatch(r"\([A-L]\)", w["text"])), None)
+            t.choice[wd.key] = (f"{part} box", letter or "Checked")
+    t.desc[f"{part} box"] = f"Part {part}: box checked"
+    for n in rows:
+        for c in F8949_COLS:
+            t.desc[f"{part} 1 row {n} ({c})"] = f"Part {part} row {n}: {F8949_DESC[c]}"
+    for c in F8949_COLS:
+        t.desc[f"{part} 2 ({c})"] = f"Part {part} totals: {F8949_DESC[c]}"
 
 
 # ------------------------------------------------------------------ schedules: tables, lists, check boxes
@@ -571,7 +636,8 @@ def _map_checks(t, widgets, words, labels):
             t.choice[k.key] = (ln, "Checked")
 
 
-HEADER_BOXES = [("namesshown", "name"), ("nameofproprietor", "name"), ("socialsecuritynumber", "ssn")]
+HEADER_BOXES = [("namesshown", "name"), ("nameofproprietor", "name"), ("nameofperson", "name"),
+                ("socialsecuritynumber", "ssn")]
 
 
 def _map_header(t, widgets, words):

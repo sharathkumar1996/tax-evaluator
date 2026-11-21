@@ -71,9 +71,16 @@ def _identify(page):
             return "SCH " + m.group(1).upper(), cont
         if "U.S. Individual Income Tax Return" in txt or re.search(r"\bForm\s+1040(-SR)?\s*\(\d{4}\)", txt):
             return "1040", cont
-        m = re.search(r"(?:^|\n)\s*Form\s+(W-2G?|\d{3,4}[A-Z]{0,2}(?:-[A-Z]{1,3})?)\b", txt)
+        # The form's own web address is the most reliable name (Form 8949 prints its big number on a
+        # line of its own, so "Form" is followed by the tax year there).
+        m = re.search(r"irs\.gov/Form(W-2G?|\d{3,4}[A-Z]{0,2})\b", txt)
         if m and not m.group(1).startswith("1040"):
             return m.group(1).upper(), cont
+        for m in re.finditer(r"(?:^|\n)\s*Form\s+(W-2G?|\d{3,4}[A-Z]{0,2}(?:-[A-Z]{1,3})?)\b", txt):
+            f = m.group(1)
+            if f.startswith("1040") or re.fullmatch(r"20[1-3]\d", f):
+                continue                                          # 'Form 2025' is the tax year, not a form
+            return f.upper(), cont
     return None, False
 
 

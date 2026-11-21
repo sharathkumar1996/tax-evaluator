@@ -111,6 +111,9 @@ Line, Correct Value, Marks, Tolerance and Feedback. Line can be:
   `spouse_ssn`, `address`, `apt`, `city`, `state`, `zip`, `virtual_currency`, `occupation`,
   `spouse_occupation`, and the age/blindness/dependent-of-someone checkboxes
 - dependents: `dep1_name`, `dep1_ssn`, `dep1_relationship`, `dep1_ctc`, `dep1_odc` (to `dep4_...`)
+- Form 8949 (Form `8949`): `I box` / `II box` = the box ticked (A, B, C, G, H, I in Part I; D, E, F, J, K, L in
+  Part II); transaction rows `I 1 row 3 (d)` = Part I, row 3, column (d); totals `I 2 (h)` = Part I line 2, column (h).
+  Part II is the same with `II`. A second Form 8949 (another box) is `8949 #2`.
 - any other box: `text: <printed label>` or `check: <printed label>` (add `| near: <words>` if needed)
 
 Leave Correct Value blank when the box must be empty.
@@ -145,7 +148,8 @@ cannot link to a line is listed under **What the system read**, and you can mark
 `field: <box name>` in the key (e.g. `field: f1_47`).
 
 Tested on the 2025 Form 1040 (every line, the filing status, the dependents table, check boxes and
-name/address boxes). For each other form you use (Schedules 1-3, C, SE ...), run one trainer
+name/address boxes), Schedules 1, 2, 3, A, B, C, D, E, SE (2026 form) and Form 8949. Schedule SE lines 7 and 14 are amounts
+printed on the form, not boxes, so leave them out of answer keys. For each other form you use (Schedules 1-3, C, SE ...), run one trainer
 return through the app and check **What the system read** before marking students.
 
 ## Integrity checks (copying)

@@ -732,6 +732,8 @@ each case, and gives every student a Simandhar-branded evaluation report with a 
    - Evaluating the same student and case again replaces the earlier result.
 4. **Check before sharing**: open *What the system read* when the app asks you to. Items it could not read are marked
    0 and flagged. Boxes it could not link to a line are listed there; to mark one, use `field: <box name>` in the key.
+   - Form 8949 line names: `I box` (A/B/C/G/H/I), `I 1 row 3 (d)` = Part I row 3 column (d), `I 2 (h)` = Part I
+     totals column (h); Part II uses `II`. Building the key from a correct return fills these in for you.
 5. **Reports later**: use **Find a report** to download any student's report again, or to delete one evaluation.
 
 ### How marks are given

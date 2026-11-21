@@ -29,6 +29,8 @@ HOW = [
     ("Form", "Form or schedule as printed: 1040, Schedule 1, Schedule C, Schedule SE, Form 8863 ... "
              "For a second copy of the same schedule write 'Schedule C #2'."),
     ("Line - numbered lines", "Line number exactly as printed on the fillable form: 1a, 2b, 25a, 31. Lettered lines (e.g. Schedule C line B) also work."),
+    ("Line - Form 8949", "I box / II box: the box ticked (A, B, C, G, H, I / D, E, F, J, K, L). Rows: I 1 row 3 (d) = Part I, "
+                         "row 3, column (d). Totals: I 2 (h) = Part I line 2, column (h). Part II uses II."),
     ("Line - Form 1040 fields", "FS (filing status), first_name, last_name, ssn, spouse_first_name, spouse_last_name, spouse_ssn, "
                                 "address, apt, city, state, zip, foreign_country, virtual_currency (Yes/No), occupation, "
                                 "spouse_occupation, you_as_dependent, spouse_as_dependent, you_born_before, you_blind, "
