@@ -178,8 +178,9 @@ with st.sidebar:
         st.download_button("Download blank answer-key template", tpl.read_bytes(), file_name="answer_key_template.xlsx")
 
 st.title("Tax Return Evaluator")
-t_eval, t_students, t_mgmt, t_integ, t_find, t_build, t_data, t_help = st.tabs(
-    ["Evaluate returns", "Students & batches", "Management dashboard", "Integrity checks", "Find a report",
+t_eval, t_students, t_mgmt, t_batch, t_integ, t_find, t_build, t_data, t_help = st.tabs(
+    ["Evaluate returns", "Students & batches", "Management dashboard", "Batch reports", "Integrity checks",
+     "Find a report",
      "Build a key from a correct return", "Data management", "How it works"])
 
 
@@ -700,6 +701,253 @@ with t_mgmt:
                         st.success("Settings saved.")
                         st.rerun()
 
+# ------------------------------------------------------------------ batch reports
+BATCH_COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300"]   # validated categorical order
+
+
+def _integrity_cached(evs_in, cases_in):
+    """Integrity analysis of the course's mock returns, re-run only when the evaluations change."""
+    sig = (tuple(sorted(cases_in)), len(evs_in), max((str(e.get("evaluated_at") or "") for e in evs_in), default=""),
+           len(db.students()))
+    if ss.get("bi_integ_sig") != sig:
+        ids = {e["student_id"] for e in evs_in}
+        mis = [m for m in db.mistakes() if m["case_id"] in cases_in and m["student_id"] in ids]
+        ss.bi_integ = analyse(evs_in, db.fingerprints(list(cases_in)), mis, db.students()) if evs_in else None
+        ss.bi_integ_sig = sig
+        ss.bi_integ_at = datetime.now().strftime("%d %b %H:%M")
+    return ss.bi_integ
+
+
+with t_batch:
+    if not db:
+        st.info("Batch reports need the database.")
+    else:
+        import json
+
+        from batch_pdf import batch_report_excel, batch_report_pdf
+        from batchreport import (ALL, batch_summary, integrity_for, missing_returns, mock_table, mock_trend, prepare,
+                                 score_bands, top_mistakes)
+        from integrity_report import CAUTION as INTEG_CAUTION
+
+        bcfg = load_settings(db.settings())
+        try:
+            trainers = json.loads(db.settings().get("batch_trainers") or "{}")
+        except ValueError:
+            trainers = {}
+        b_fc_all = db.final_cases()
+        b_case_info = {c["case_id"]: c for c in db.cases()}
+        b_studs_all, b_evs_all = prepare(db.students(), db.evaluations(), b_fc_all)
+        all_batches = sorted({x["batch"] for x in b_studs_all})
+        color_of = {b: BATCH_COLORS[i % len(BATCH_COLORS)] for i, b in enumerate(all_batches)}   # follows the batch
+
+        st.subheader("Batch reports")
+        if not b_studs_all:
+            st.info("Add the student roster under **Students & batches** first.")
+        else:
+            f1, f2 = st.columns([1, 1])
+            sel_b = f1.multiselect("Batches", all_batches, default=all_batches, key="bi_batches")
+            done_cases = [c for c in b_fc_all if any(e["case_id"] == c for e in b_evs_all)]
+            sel_c = f2.multiselect("Mock returns", done_cases, default=done_cases, key="bi_cases",
+                                   help="Only these mock returns are counted everywhere on this page and in the "
+                                        "reports.")
+            if not sel_b or not sel_c:
+                st.info("Choose at least one batch and one mock return." if done_cases else
+                        "No mock returns evaluated yet.")
+            else:
+                studs = [x for x in b_studs_all if x["batch"] in sel_b]
+                ids_sel = {x["student_id"] for x in studs}
+                evs = [e for e in b_evs_all if e["case_id"] in sel_c and e["student_id"] in ids_sel]
+                mcq_all = db.mcq_scores()
+                with st.spinner("Checking integrity..."):
+                    integ = _integrity_cached([e for e in b_evs_all if e["case_id"] in sel_c], tuple(sel_c))
+                summary = batch_summary(studs, evs, mcq_all, sel_c, bcfg,
+                                        integ["students"] if integ else None, trainers)
+                all_row = summary.set_index("Batch").loc[ALL]
+                pc = lambda v: "-" if v is None or pd.isna(v) else f"{v:g}%"
+
+                o_tab, d_tab, r_tab, t_tab = st.tabs(["Overview", "Batch detail", "Reports for trainers",
+                                                      "Trainers"])
+                # ------------------------------------------------ overview
+                with o_tab:
+                    k = st.columns(6)
+                    k[0].metric("Students", int(all_row["Students"]))
+                    k[1].metric("Submission rate", pc(all_row["Submission rate %"]),
+                                help=f"{all_row['Returns received']} of {all_row['Returns expected']} returns due "
+                                     "so far")
+                    k[2].metric("On-time rate", pc(all_row["On-time rate %"]))
+                    k[3].metric("Average score", pc(all_row["Average score %"]))
+                    k[4].metric("At risk", int(all_row["At risk"]),
+                                help=f"Progress score below the pass mark of {bcfg['pass_mark']:g}")
+                    k[5].metric("Integrity flags", int(all_row["Integrity flags"]),
+                                help="Students rated likely or very likely copied")
+                    st.markdown("##### Batch comparison")
+                    st.dataframe(
+                        summary.drop(columns=["Returns expected"]), hide_index=True, use_container_width=True,
+                        column_config={
+                            "Submission rate %": st.column_config.ProgressColumn(format="%.1f%%", min_value=0,
+                                                                                 max_value=100),
+                            "On-time rate %": st.column_config.ProgressColumn(format="%.1f%%", min_value=0,
+                                                                              max_value=100),
+                            "Average score %": st.column_config.NumberColumn(format="%.1f"),
+                            "MCQ average %": st.column_config.NumberColumn(format="%.1f")})
+                    trend = mock_trend(studs, evs, sel_c, [b for b in all_batches if b in sel_b])
+                    if not trend.empty:
+                        st.markdown("##### Average score per mock return")
+                        try:
+                            import altair as alt
+                            dom = [b for b in all_batches if b in set(trend["Batch"])]
+                            chart = (alt.Chart(trend).mark_line(point=alt.OverlayMarkDef(size=60, filled=True),
+                                                                strokeWidth=2)
+                                     .encode(x=alt.X("Case:N", sort=sel_c, title=None),
+                                             y=alt.Y("Average %:Q", scale=alt.Scale(domain=[0, 100]),
+                                                     title="Average score (%)"),
+                                             color=alt.Color("Batch:N", scale=alt.Scale(
+                                                 domain=dom, range=[color_of[b] for b in dom]),
+                                                 legend=alt.Legend(orient="top", title=None)),
+                                             tooltip=["Batch", "Case", "Average %", "Returns"])
+                                     .properties(height=280))
+                            rule = alt.Chart(pd.DataFrame({"y": [bcfg["pass_mark"]]})).mark_rule(
+                                strokeDash=[4, 3], color="#8a8a8a").encode(y="y:Q")
+                            st.altair_chart(chart + rule, use_container_width=True)
+                            st.caption(f"Dashed line: pass mark {bcfg['pass_mark']:g}. Hover a point for details.")
+                        except Exception:
+                            log.exception("chart failed")
+                        with st.expander("Table view"):
+                            st.dataframe(trend.pivot(index="Case", columns="Batch", values="Average %")
+                                         .reindex(sel_c).dropna(how="all"), use_container_width=True)
+                    if integ is None:
+                        st.caption("Integrity: nothing to check yet.")
+                    else:
+                        st.caption(f"Integrity check last refreshed {ss.get('bi_integ_at', '')} - it re-runs by "
+                                   "itself when new returns are evaluated.")
+
+                # ------------------------------------------------ batch detail
+                with d_tab:
+                    pick = st.selectbox("Batch", sel_b, key="bi_one",
+                                        format_func=lambda b: b + (f" - {trainers[b]['trainer']}"
+                                                                   if trainers.get(b, {}).get("trainer") else ""))
+                    row = summary.set_index("Batch").loc[pick]
+                    bstuds = [x for x in studs if x["batch"] == pick]
+                    scores = final_scores(bstuds, evs, mcq_all, sel_c, bcfg, view=SO_FAR)
+
+                    def delta(col):
+                        a, b_ = row[col], all_row[col]
+                        return None if a is None or b_ is None or pd.isna(a) or pd.isna(b_) else \
+                            f"{a - b_:+.1f} vs all"
+                    k = st.columns(6)
+                    k[0].metric("Students", int(row["Students"]), help=f"{int(row['Mocks done'])} mock returns done")
+                    k[1].metric("Submission rate", pc(row["Submission rate %"]), delta("Submission rate %"))
+                    k[2].metric("On-time rate", pc(row["On-time rate %"]), delta("On-time rate %"))
+                    k[3].metric("Average score", pc(row["Average score %"]), delta("Average score %"))
+                    k[4].metric("On track / At risk", f"{int(row['On track'])} / {int(row['At risk'])}")
+                    k[5].metric("Integrity flags", int(row["Integrity flags"]))
+                    s1, s2, s3, s4, s5 = st.tabs(["Students", "Mock returns", "Not received", "Common mistakes",
+                                                  "Integrity"])
+                    with s1:
+                        g1, g2 = st.columns([1, 2])
+                        res_pick = g1.multiselect("Show", ["At risk", "On track", "Not started"],
+                                                  default=["At risk", "On track", "Not started"], key="bi_res")
+                        q = g2.text_input("Search name or ID", key="bi_q")
+                        view_df = scores[scores["Result"].isin(res_pick)]
+                        if q.strip():
+                            view_df = view_df[view_df["Name"].str.contains(q, case=False, na=False) |
+                                              view_df["Student ID"].str.contains(q, case=False, na=False)]
+                        st.dataframe(view_df.sort_values("Total / 100"), hide_index=True, use_container_width=True,
+                                     column_config={"Total / 100": st.column_config.ProgressColumn(
+                                         format="%.1f", min_value=0, max_value=100)})
+                        bands = score_bands(scores)
+                        if bands["Students"].sum():
+                            st.markdown("##### How the batch is spread")
+                            st.bar_chart(bands, x="Score band", y="Students", color=color_of[pick], height=220)
+                    with s2:
+                        st.dataframe(mock_table(studs, evs, sel_c, b_case_info, pick), hide_index=True,
+                                     use_container_width=True)
+                    with s3:
+                        mr = missing_returns(studs, evs, pick)
+                        st.write("Every return is in." if mr.empty else
+                                 f"**{len(mr)}** student(s) have mock returns not received.")
+                        if not mr.empty:
+                            st.dataframe(mr, hide_index=True, use_container_width=True)
+                    with s4:
+                        st.caption("The lines most often wrong in this batch - good topics for a revision class.")
+                        st.dataframe(top_mistakes(db.mistakes(), evs, pick, limit=25), hide_index=True,
+                                     use_container_width=True)
+                    with s5:
+                        st.caption(INTEG_CAUTION)
+                        ib = integrity_for(integ, pick)
+                        if ib["students"].empty and ib["pairs"].empty and ib["trainer"].empty:
+                            st.success("No integrity concerns in this batch.")
+                        else:
+                            st.markdown("**Students with concerns**")
+                            st.dataframe(ib["students"], hide_index=True, use_container_width=True)
+                            if not ib["pairs"].empty:
+                                st.markdown("**Flagged pairs**")
+                                st.dataframe(ib["pairs"], hide_index=True, use_container_width=True,
+                                             column_config={"Evidence": st.column_config.TextColumn(width="large")})
+                            if not ib["trainer"].empty:
+                                st.markdown("**Built on the trainer's correct-return file**")
+                                st.dataframe(ib["trainer"], hide_index=True, use_container_width=True)
+
+                # ------------------------------------------------ reports for trainers
+                def build_reports(b):
+                    bs = [x for x in studs if x["batch"] == b]
+                    sc = final_scores(bs, evs, mcq_all, sel_c, bcfg, view=SO_FAR)
+                    r_ = summary.set_index("Batch").loc[b].to_dict()
+                    args = (b, trainers.get(b, {}).get("trainer", ""), r_, sc,
+                            mock_table(studs, evs, sel_c, b_case_info, b), missing_returns(studs, evs, b),
+                            top_mistakes(db.mistakes(), evs, b), integrity_for(integ, b))
+                    return (batch_report_pdf(*args, bcfg, institute, cohort_avg=all_row["Average score %"],
+                                             integrity_ran=integ is not None, caution=INTEG_CAUTION),
+                            batch_report_excel(*args, integrity_ran=integ is not None))
+
+                with r_tab:
+                    st.write("One consolidated report per batch for its trainer: a Simandhar-branded PDF and an "
+                             "Excel workbook with progress, submissions, mock-by-mock results, common mistakes and "
+                             "integrity findings. They use the batches and mock returns chosen above.")
+                    stamp = datetime.now().strftime("%Y%m%d")
+                    fname = lambda b, ext: (f"Batch_report_{clean(b)}_"
+                                            f"{clean(trainers.get(b, {}).get('trainer', '') or 'trainer')}_{stamp}.{ext}")
+                    if st.button(f"Prepare reports for all {len(sel_b)} batches", type="primary"):
+                        zb = io.BytesIO()
+                        with st.spinner("Preparing reports..."), zipfile.ZipFile(zb, "w", zipfile.ZIP_DEFLATED) as z:
+                            for b in sel_b:
+                                p_, x_ = build_reports(b)
+                                z.writestr(fname(b, "pdf"), p_)
+                                z.writestr(fname(b, "xlsx"), x_)
+                        ss.bi_zip = zb.getvalue()
+                    if ss.get("bi_zip"):
+                        st.download_button("Download all batch reports (zip)", ss.bi_zip,
+                                           file_name=f"Batch_reports_{stamp}.zip")
+                    st.divider()
+                    for b in sel_b:
+                        tr = trainers.get(b, {})
+                        c1, c2, c3 = st.columns([3, 1, 1])
+                        c1.markdown(f"**{b}** · {tr.get('trainer') or 'trainer not set'}"
+                                    + (f" · {tr.get('email')}" if tr.get("email") else ""))
+                        if c2.button("Prepare", key=f"bi_prep_{b}"):
+                            ss[f"bi_rep_{b}"] = build_reports(b)
+                        if ss.get(f"bi_rep_{b}"):
+                            p_, x_ = ss[f"bi_rep_{b}"]
+                            c3.download_button("PDF", p_, file_name=fname(b, "pdf"), key=f"bi_pdf_{b}")
+                            c3.download_button("Excel", x_, file_name=fname(b, "xlsx"), key=f"bi_xls_{b}")
+
+                # ------------------------------------------------ trainers
+                with t_tab:
+                    st.write("Who trains each batch. Their names go on the reports and in the file names.")
+                    tdf = pd.DataFrame([{"Batch": b, "Trainer": trainers.get(b, {}).get("trainer", ""),
+                                         "Email": trainers.get(b, {}).get("email", "")} for b in all_batches])
+                    ed = st.data_editor(tdf, hide_index=True, use_container_width=True, disabled=["Batch"],
+                                        key="bi_trainers")
+                    if st.button("Save trainers"):
+                        new = {r["Batch"]: {"trainer": str(r["Trainer"] or "").strip(),
+                                            "email": str(r["Email"] or "").strip()} for _, r in ed.iterrows()}
+                        db.save_settings({"batch_trainers": json.dumps(new)})
+                        for b in all_batches:
+                            ss.pop(f"bi_rep_{b}", None)
+                        ss.pop("bi_zip", None)
+                        st.success("Trainers saved.")
+                        st.rerun()
+
 # ------------------------------------------------------------------ integrity checks
 with t_integ:
     if not db:
@@ -1007,6 +1255,17 @@ each case, and gives every student a Simandhar-branded evaluation report with a 
   who is at risk; *Final* counts everything, missing work as 0. Download the results in Excel and a
   Simandhar-branded scorecard PDF for each student.
 - Under *Scoring settings*, tick only the cases that are the course's mock returns, so practice cases don't count.
+
+### Batch reports (for the trainers)
+- **Filters** at the top (batches, mock returns) apply to everything on the page and to the reports.
+- **Overview**: totals, a batch-by-batch comparison (submission rate, on-time rate, average and median score,
+  MCQ average, on track / at risk, integrity flags) and the average score of every mock per batch.
+- **Batch detail**: one batch's students (filter by result, search), mock-by-mock results, returns not received,
+  the most common mistakes and its integrity findings.
+- **Reports for trainers**: one Simandhar-branded PDF and Excel workbook per batch - download one, or all as a zip.
+- **Trainers**: who trains each batch (names go on the reports and file names).
+- A batch is measured only on the mock returns it has done so far. The integrity check runs by itself and
+  refreshes when new returns are evaluated.
 
 ### Other tabs
 - **Integrity checks**: compares returns of the same case for copied or shared files, files saved over another

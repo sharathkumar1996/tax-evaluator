@@ -25,6 +25,8 @@ results exist only in the open browser tab.
 | `bulk.py` | Groups a bulk upload (PDFs / zips) into one return per student, with zip safety limits |
 | `report_pdf.py` | Builds the student PDF report |
 | `db.py` | Saves students, batches, case keys, scores and mistakes (Neon Postgres) |
+| `batchreport.py` | Batch summary, per-mock results, common mistakes, returns not received, integrity per batch |
+| `batch_pdf.py` | Consolidated batch report (PDF and Excel) for the trainers |
 | `finalscore.py` | Final course score (accuracy + on-time + MCQ), MCQ sheet reading |
 | `scorecard.py` | Final scorecard PDF and results workbook |
 | `metrics.py` | Per-return figures saved with each evaluation; rebuilding a saved report |
@@ -34,6 +36,13 @@ results exist only in the open browser tab.
 | `requirements.txt`, `.streamlit/config.toml` | Deployment settings |
 | `tests/` | Automated tests (`python -m pytest tests`), with a blank 2025 Form 1040 as a test form |
 
+
+## Batch reports
+
+Tab *Batch reports*: filters (batches, mock returns); overview with a batch comparison and the average score per
+mock per batch; batch detail (students, mocks, returns not received, common mistakes, integrity); a consolidated
+Simandhar-branded PDF + Excel per batch for its trainer (`batchreport.py`, `batch_pdf.py`), one at a time or all as
+a zip; and the batch → trainer list (stored in settings as `batch_trainers`).
 
 ## Final course score
 
