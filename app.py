@@ -256,13 +256,22 @@ with t_eval:
         mode = st.radio("How many returns?", ["One return", "Many returns at once (bulk)"], horizontal=True)
 
         if mode == "One return":
+            pick = st.radio("Upload", ["PDF files", "A whole folder"], horizontal=True, key="one_pick",
+                            help="'A whole folder': choose the student's folder (e.g. 164746_M01); every PDF in it "
+                                 "and its sub-folders is uploaded.")
             pdfs = st.file_uploader("Student return: the filled-in IRS fillable forms (select all of them - "
-                                    "one PDF per form is fine)", type=["pdf"],
-                                    accept_multiple_files=True, key=f"ret{ss.uploader_n}")
+                                    "one PDF per form is fine)" if pick == "PDF files" else
+                                    "Student return: choose the folder holding the student's PDF forms",
+                                    type=["pdf"], accept_multiple_files=True if pick == "PDF files" else "directory",
+                                    key=f"ret{ss.uploader_n}_{pick[0]}")
             guess = ""
             if pdfs:
-                mt = re.match(r"^([A-Za-z0-9-]+)_", pdfs[0].name)
-                guess = mt.group(1).upper() if mt else ""
+                segs = pdfs[0].name.replace("\\", "/").split("/")
+                for part in list(reversed(segs[:-1])) + segs[-1:]:      # the student's folder first, then the file
+                    mt = re.match(r"^\s*([A-Za-z0-9-]*\d[A-Za-z0-9-]*)\s*_", part)
+                    if mt and not re.fullmatch(r"F\d{4}[A-Z]*", mt.group(1).upper()):   # not 'f1040_2025.pdf'
+                        guess = mt.group(1).upper()
+                        break
             c1, c2 = st.columns(2)
             sid = c2.text_input("Student ID", value=guess, key=f"sid{ss.uploader_n}").strip().upper()
             known = db.student(sid) if (db and sid) else None
@@ -320,9 +329,16 @@ with t_eval:
             st.write("Upload many PDFs at once, or zip files containing them. Name each student's file(s) "
                      "`StudentID_CaseID.pdf` (e.g. `S0123_" + k.case_id + ".pdf`). A student "
                      "can have several PDFs, one per form: `S0123_" + k.case_id + "_1040.pdf`, `S0123_" + k.case_id + "_SchC.pdf`, "
-                     "or a folder `S0123_" + k.case_id + "` holding them. Files for another case are skipped.")
-            files = st.file_uploader("Returns (PDFs or zips)", type=["pdf", "zip"], accept_multiple_files=True,
-                                     key=f"bulk{ss.uploader_n}")
+                     "or a folder `S0123_" + k.case_id + "` holding them. You can also upload the whole batch "
+                     "folder in one go. Files for another case are skipped.")
+            bpick = st.radio("Upload", ["PDF / zip files", "A whole folder"], horizontal=True, key="bulk_pick",
+                             help="'A whole folder': choose the batch folder (e.g. the OneDrive folder holding one "
+                                  "sub-folder per student). Every PDF and zip inside it is uploaded.")
+            files = st.file_uploader("Returns (PDFs or zips)" if bpick != "A whole folder" else
+                                     "Choose the folder holding the students' returns",
+                                     type=["pdf", "zip"],
+                                     accept_multiple_files=True if bpick != "A whole folder" else "directory",
+                                     key=f"bulk{ss.uploader_n}_{bpick[0]}")
             c1, c2 = st.columns(2)
             skip_done = c1.checkbox("Skip students already evaluated for this case", value=bool(db), disabled=not db,
                                     help="Lets you restart an interrupted upload without marking anything twice.")
@@ -726,9 +742,11 @@ each case, and gives every student a Simandhar-branded evaluation report with a 
    - No key yet? Under **Build a key from a correct return**, upload the trainer's correct fillable forms. You get
      a draft key listing every filled-in item; set the marks, categories and feedback in Excel, then upload it.
 3. **Evaluate** under **Evaluate returns**:
-   - **One return**: select all of the student's PDFs, check the Student ID and name, then press *Evaluate*.
-   - **Many returns at once**: upload the PDFs, or zip files / the OneDrive batch folder zip. Each student's files
-     are grouped by their name. Download all the reports as one zip, and the results as Excel.
+   - **One return**: select all of the student's PDFs, or choose **A whole folder** and pick the student's folder.
+     Check the Student ID (taken from the folder or file name) and name, then press *Evaluate*.
+   - **Many returns at once**: upload the PDFs or zip files, or choose **A whole folder** and pick the batch folder
+     (one sub-folder per student, named `StudentID_CaseID`). Each student's files are grouped by their name.
+     Download all the reports as one zip, and the results as Excel.
    - Evaluating the same student and case again replaces the earlier result.
 4. **Check before sharing**: open *What the system read* when the app asks you to. Items it could not read are marked
    0 and flagged. Boxes it could not link to a line are listed there; to mark one, use `field: <box name>` in the key.
