@@ -326,6 +326,8 @@ def grade(ret, key: AnswerKey):
         })
     if key.unexpected_marks is not None:
         keyed = {s["_key"] for s in key.steps}
+        if hasattr(ret, "canonical"):        # the same lines under the names the reader uses today
+            keyed |= {ret.canonical(s["Form"], s["Line"]) for s in key.steps}
         n = len(rows)
         for fld in ret.all_fields():
             f, inst = norm_form(fld["form"])

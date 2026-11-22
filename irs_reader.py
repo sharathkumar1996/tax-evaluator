@@ -1124,6 +1124,21 @@ class IRSReturn:
         return self._deps
 
     # ---------------------------------------------------------------- lookups
+    def canonical(self, form, line):
+        """(form, copy, line) under today's names for a key's Form/Line, so the unexpected-entries check
+        recognises a line the key covers even when the key names it the old way or as 'field: <box>'."""
+        f, inst = norm_form(form)
+        raw = str(line or "").strip()
+        f, ln = _old_8949_name(f, norm_line(raw))
+        m = re.match(r"^field:\s*(.+)$", raw, re.I)
+        copy = self.copies.get((f, inst))
+        if m and copy:
+            want = m.group(1).strip()
+            for _, tpl, w in self._items(copy):
+                if want in (w.short, w.name) and w.key in tpl.lines:
+                    return f, inst, norm_line(tpl.lines[w.key])
+        return f, inst, ln
+
     def value(self, form, line):
         f, inst = norm_form(form)
         raw = str(line or "").strip()

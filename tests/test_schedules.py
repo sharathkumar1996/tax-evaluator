@@ -154,3 +154,37 @@ def test_8949_keys_made_before_calibration_still_work():
     assert r.value("8949", "1 (d)")[0] == 2600
     assert r.value("8949", "1 (b)")[0] == "02/10/2024"
     assert r.value("2025", "3 (h)")[0] == 100
+
+
+def test_old_8949_key_does_not_flag_covered_entries_as_unexpected():
+    """A key with the old names ('1 (d)', 'field: f2_91') must not count the same entries as unexpected."""
+    import io
+    import re as _re
+
+    from openpyxl import load_workbook
+
+    from grader_core import grade, load_key
+    from make_keys import draft_from_return
+    lines, choices = LAYOUT["8949"]
+    d = fill(BLANK["8949"], {lines["II 1 row 1 (a)"]: "One Stock Sale", lines["II 1 row 1 (d)"]: "2600",
+                             lines["II 1 row 1 (e)"]: "2000", lines["II 1 row 1 (h)"]: "600",
+                             lines["II 2 (d)"]: "2600", lines["II 2 (h)"]: "600"},
+             {choices["II box"]["D"][0]: choices["II box"]["D"][1]})
+    data, _, _ = draft_from_return([("k.pdf", d)], "C01", "t", 2025)
+    wb = load_workbook(io.BytesIO(data))
+    for ws in wb:
+        for row in ws.iter_rows():
+            for c in row:
+                v = str(c.value or "")
+                m = _re.fullmatch(r"II 1 row (\d+) \(([a-h])\)", v)
+                if m:
+                    c.value = f"{m.group(1)} ({m.group(2)})"
+                m = _re.fullmatch(r"II 2 \(([a-h])\)", v)
+                if m:
+                    c.value = "field: " + lines[v]
+    b = io.BytesIO()
+    wb.save(b)
+    key = load_key(b.getvalue())
+    assert key.unexpected_marks and any(s["Line"] == "1 (d)" for s in key.steps)
+    rows = grade(IRSReturn([("s.pdf", d)]), key)
+    assert [r["Line"] for r in rows if r["Result"] != "Correct"] == []
