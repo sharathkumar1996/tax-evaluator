@@ -93,3 +93,45 @@ def test_erasing(db):
     db.erase_all()
     assert db.counts() == {"students": 0, "cases": 0, "evaluations": 0, "mistakes": 0}
     assert db.health()
+
+
+def test_on_time_status_is_kept_on_reevaluation_and_changes_are_logged(db):
+    db.upsert_students([("S1", "Asha", "B1")])
+    db.save_case(_Key(), b"k", "key.xlsx")
+    db.save_evaluation("S1", "C03", "a.pdf", M, ROWS, "h", "staff", on_time=True)
+    assert db.evaluations("S1")[0]["on_time"] == 1 and db.status_history() == []   # first status: no history
+    db.save_evaluation("S1", "C03", "b.pdf", M, ROWS, "h", "staff")                  # re-evaluated, no status given
+    assert db.evaluations("S1")[0]["on_time"] == 1
+    assert db.set_on_time([("S1", "C03", False), ("S9", "C03", True)], "Ravi", "submitted after deadline") == 1
+    assert db.evaluations("S1")[0]["on_time"] == 0
+    h = db.status_history()
+    assert [(x["old_status"], x["new_status"], x["changed_by"], x["reason"]) for x in h] == \
+        [("On time", "Late", "Ravi", "submitted after deadline")]
+    assert db.set_on_time([("S1", "C03", False)], "Ravi", "again") == 0               # no change, no log
+    db.save_evaluation("S1", "C03", "c.pdf", M, ROWS, "h", "staff", on_time=True)    # changed while evaluating
+    assert db.status_history()[0]["reason"] == "set while evaluating"
+    db.erase_case_results("C03")
+    assert db.status_history() == []
+
+
+def test_mcq_scores_settings_and_final_cases(db):
+    db.upsert_students([("S1", "Asha", "B1"), ("S2", "Ben", "B2")])
+    db.save_mcq([("S1", 1, 40), ("S1", 2, 45), ("S2", 1, 30)], "staff")
+    db.save_mcq([("S1", 1, 42)], "staff")                                            # re-upload replaces
+    assert [(r["student_id"], r["test_no"], r["marks"]) for r in db.mcq_scores()] == \
+        [("S1", 1, 42), ("S1", 2, 45), ("S2", 1, 30)]
+    db.erase_student("S2")
+    assert {r["student_id"] for r in db.mcq_scores()} == {"S1"}
+    db.save_settings({"pass_mark": 70, "n_mocks": 12})
+    db.save_settings({"pass_mark": 65})
+    assert db.settings() == {"pass_mark": "65", "n_mocks": "12"}
+
+    class K2(_Key):
+        case_id = "P01"
+    db.save_case(_Key(), b"k", "k.xlsx")
+    db.save_case(K2(), b"k2", "k2.xlsx")
+    assert db.final_cases() == ["C03", "P01"]                                          # new cases count by default
+    db.set_final_cases(["C03"])
+    assert db.final_cases() == ["C03"]
+    db.erase_all()
+    assert db.mcq_scores() == [] and db.final_cases() == []

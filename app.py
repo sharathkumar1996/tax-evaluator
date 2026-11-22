@@ -24,9 +24,12 @@ from grader_core import KeyError_, fmt, grade, load_key, summarise
 from integrity import TRAINER, analyse, fingerprints
 from irs_reader import ReaderError
 from make_keys import draft_from_return
+from finalscore import (FINAL, LABELS, SO_FAR, MCQError, check_settings, final_scores, load_settings,
+                        parse_mcq)
 from metrics import flag, rebuild_rows, return_metrics
 from readers import read_return
 from report_pdf import build_report
+from scorecard import results_workbook, scorecard_pdf
 
 st.set_page_config(page_title="Tax Return Evaluator", page_icon="📝", layout="wide")
 HERE = Path(__file__).parent
@@ -120,7 +123,7 @@ with st.sidebar:
     saved = db.cases() if db else []
     if saved:
         labels = ["(choose a saved case)"] + [f"{c['case_id']} - {c['title']}" for c in saved]
-        pick = st.selectbox("Saved cases", labels)
+        pick = st.selectbox("Saved cases", labels, key="saved_pick")
         if pick != ss.get("prev_pick"):            # act only when the choice changes
             ss.prev_pick = pick
             if pick != labels[0]:
@@ -199,10 +202,14 @@ def evaluate_files(files, sid, sname, key):
             "unlinked": ret.unlinked(), "file_label": ", ".join(n for n, _ in files)[:500]}
 
 
-def save(sid, res):
+def save(sid, res, on_time=None):
     if db:
         db.save_evaluation(sid, ss.key.case_id, res["file_label"], res["m"], res["rows"], ss.key_hash, staff or "",
-                           source_format=res["format"], notes=" | ".join(res["notes"]), fingerprints=res.get("fp"))
+                           source_format=res["format"], notes=" | ".join(res["notes"]), fingerprints=res.get("fp"),
+                           on_time=on_time)
+
+
+SUBMITTED = ["On time", "Late"]
 
 
 def show_result(r):
@@ -253,7 +260,8 @@ with t_eval:
     else:
         k = ss.key
         st.subheader(f"2. Evaluate returns - Case {k.case_id}")
-        mode = st.radio("How many returns?", ["One return", "Many returns at once (bulk)"], horizontal=True)
+        mode = st.radio("How many returns?", ["One return", "Many returns at once (bulk)"], horizontal=True,
+                        key="eval_mode")
 
         if mode == "One return":
             pick = st.radio("Upload", ["PDF files", "A whole folder"], horizontal=True, key="one_pick",
@@ -282,6 +290,9 @@ with t_eval:
             if sid and not re.fullmatch(r"[A-Z0-9-]{1,40}", sid):
                 st.error("Student ID may only contain letters, digits and '-' (up to 40 characters).")
                 sid = ""
+            sub_one = st.radio("Return submitted", SUBMITTED, horizontal=True, key=f"subm{ss.uploader_n}",
+                               help="On time earns this return's on-time marks in the final score; late earns none. "
+                                    "It can be changed later under Management dashboard > Submission status.")
             if st.button("Evaluate", type="primary", disabled=not pdfs or not sid):
                 with st.spinner("Reading the return and marking it..."):
                     files = [(f.name, f.getvalue()) for f in pdfs]
@@ -297,7 +308,7 @@ with t_eval:
                         st.stop()
                     saved = False
                     try:
-                        save(sid, res)
+                        save(sid, res, on_time=sub_one == "On time")
                         saved = True
                     except Exception:
                         log.exception("saving failed for %s", sid)
@@ -305,7 +316,7 @@ with t_eval:
                                  "report below, then try again later.")
                     rec = {"Student ID": sid, "Student Name": sname or "-", "Case": k.case_id, "File": res["file_label"],
                            "Score": res["m"]["score"], "Out of": res["m"]["out_of"], "Percent": res["m"]["pct"] * 100,
-                           "Errors": res["m"]["errors"],
+                           "Errors": res["m"]["errors"], "Submission": sub_one,
                            "Evaluated": datetime.now().strftime("%d-%b %H:%M"), **res}
                     ss.results.append(rec)
                     ss.results = ss.results[-200:]          # keep the session's memory bounded
@@ -343,6 +354,13 @@ with t_eval:
             skip_done = c1.checkbox("Skip students already evaluated for this case", value=bool(db), disabled=not db,
                                     help="Lets you restart an interrupted upload without marking anything twice.")
             make_reports = c2.checkbox("Also create the PDF report for every student", value=True)
+            s1, s2 = st.columns([1, 2])
+            bulk_sub = s1.radio("This batch submitted", SUBMITTED, horizontal=True, key="bulk_sub",
+                                help="Applied to every student in this upload, except the IDs listed beside it.")
+            other = "Late" if bulk_sub == "On time" else "On time"
+            exc_txt = s2.text_input(f"Except these student IDs - they were {other.lower()} (comma separated)",
+                                    key=f"bulk_exc{ss.uploader_n}")
+            exceptions = {x.strip().upper() for x in re.split(r"[,;\s]+", exc_txt or "") if x.strip()}
             if st.button("Evaluate all", type="primary", disabled=not files):
                 roster = {s_["student_id"]: s_ for s_ in db.students()} if db else {}
                 groups, skipped = group_uploads([(f.name, f.getvalue()) for f in files], case_id=k.case_id,
@@ -361,7 +379,7 @@ with t_eval:
                         stud = roster.get(sid, {})
                         row = {"File": g.label[:200], "Student ID": sid, "Name": stud.get("name") or "",
                                "Batch": stud.get("batch") or "", "Score": None, "Out of": None, "Score /100": None,
-                               "Errors": None, "Status": "", "Notes": ""}
+                               "Errors": None, "Submission": "", "Status": "", "Notes": ""}
                         naming = ("; ".join(g.warnings) + ". ") if g.warnings else ""
                         if roster and sid not in roster:
                             naming += f"Student ID {sid} is not on the roster. "
@@ -372,7 +390,9 @@ with t_eval:
                         else:
                             try:
                                 res = evaluate_files(g.load(), sid, row["Name"], k)
-                                save(sid, res)
+                                sub_status = other if sid in exceptions else bulk_sub
+                                row["Submission"] = sub_status
+                                save(sid, res, on_time=sub_status == "On time")
                                 m = res["m"]
                                 warn = m["needs_review"] or res["notes"] or res["unlinked"]
                                 row.update({"Score": m["score"], "Out of": m["out_of"], "Score /100": round(m["pct"] * 100, 1),
@@ -468,9 +488,209 @@ with t_students:
 # ------------------------------------------------------------------ management
 with t_mgmt:
     st.subheader("Management dashboard")
-    st.info("This dashboard is being rebuilt. New management reports will appear here in a coming update. "
-            "Every evaluation is still saved, so nothing is lost in the meantime: use **Find a report** for any "
-            "student's report, and **Integrity checks** for copying checks.")
+    if not db:
+        st.info("The management dashboard needs the database (it adds up every saved evaluation).")
+    else:
+        cfg = load_settings(db.settings())
+        m_res, m_sub, m_mcq, m_cfg = st.tabs(["Final results", "Submission status", "MCQ test marks",
+                                              "Scoring settings"])
+        all_students = db.students()
+        fcases = db.final_cases()
+        case_info = {c["case_id"]: c for c in db.cases()}
+
+        # ---------------------------------------------------------- final results
+        with m_res:
+            st.caption(f"Return accuracy {cfg['w_accuracy']:g} + on-time submission {cfg['w_on_time']:g} + MCQ tests "
+                       f"{cfg['w_mcq']:g} = 100. Pass mark {cfg['pass_mark']:g}. {cfg['n_mocks']:g} mock returns "
+                       f"({len(fcases)} set up so far), {cfg['n_mcq']:g} MCQ tests of {cfg['mcq_out_of']:g} marks.")
+            if len(fcases) > cfg["n_mocks"]:
+                st.warning(f"{len(fcases)} cases count toward the final score but the course has {cfg['n_mocks']:g} "
+                           "mock returns. Untick the practice cases under **Scoring settings**.")
+            r1, r2 = st.columns([1, 2])
+            view = r1.radio("View", ["Progress so far", "Final (course complete)"], key="fs_view",
+                            help="Progress so far: only the returns and MCQ tests the student's batch has done "
+                                 "count, scaled to 100. Final: every mock return and test counts; missing ones "
+                                 "count 0.")
+            view = SO_FAR if view.startswith("Progress") else FINAL
+            batches = sorted({x["batch"] or "" for x in all_students})
+            pick_b = r2.multiselect("Batches", batches, default=batches, key="fs_batches")
+            studs = [x for x in all_students if (x["batch"] or "") in pick_b]
+            if not studs:
+                st.info("No students on the roster for these batches - add them under 'Students & batches'.")
+            else:
+                evs = [e for e in db.evaluations() if e["case_id"] in fcases]
+                df = final_scores(studs, evs, db.mcq_scores(), fcases, cfg, view=view)
+                good = "Pass" if view == FINAL else "On track"
+                n_good = int((df["Result"] == good).sum())
+                c = st.columns(3)
+                c[0].metric("Students", len(df))
+                c[1].metric(good, n_good)
+                c[2].metric("Fail" if view == FINAL else "At risk",
+                            int((df["Result"] == ("Fail" if view == FINAL else "At risk")).sum()))
+                if int(df["Status not set"].sum()):
+                    st.warning(f"{int(df['Status not set'].sum())} evaluated return(s) have no on-time status yet "
+                               "(evaluated before this feature) and earn no on-time marks. Set them under "
+                               "**Submission status**.")
+                st.dataframe(df, hide_index=True, use_container_width=True)
+                stamp = datetime.now().strftime("%Y%m%d")
+                d1, d2 = st.columns(2)
+                d1.download_button("Download results (Excel)", results_workbook(df, cfg, db.status_history(), view),
+                                   file_name=f"{'Final_results' if view == FINAL else 'Progress'}_{stamp}.xlsx")
+
+                def returns_of(sid):
+                    mine = {e["case_id"]: e for e in evs if e["student_id"] == sid}
+                    return [{"case_id": cid, "title": (case_info.get(cid) or {}).get("title") or "",
+                             "pct": (mine.get(cid) or {}).get("pct"), "on_time": (mine.get(cid) or {}).get("on_time")}
+                            for cid in fcases]
+                if d2.button("Prepare scorecards for these students (zip)"):
+                    zb = io.BytesIO()
+                    with zipfile.ZipFile(zb, "w", zipfile.ZIP_DEFLATED) as z:
+                        for rec in df.to_dict("records"):
+                            z.writestr(f"Scorecard_{clean(rec['Student ID'])}.pdf",
+                                       scorecard_pdf(rec, returns_of(rec["Student ID"]), cfg, institute, view))
+                    ss.scorecards = zb.getvalue()
+                if ss.get("scorecards"):
+                    d2.download_button("Download scorecards (zip)", ss.scorecards, file_name=f"Scorecards_{stamp}.zip")
+                one = st.selectbox("Scorecard for one student", [""] + df["Student ID"].tolist(), key="fs_one",
+                                   format_func=lambda x: "Choose a student" if not x else
+                                   f"{x} - {df.set_index('Student ID').loc[x, 'Name']}")
+                if one:
+                    rec = df.set_index("Student ID").loc[one].to_dict()
+                    rec["Student ID"] = one
+                    st.download_button(f"Download scorecard - {one}",
+                                       scorecard_pdf(rec, returns_of(one), cfg, institute, view),
+                                       file_name=f"Scorecard_{clean(one)}.pdf")
+
+        # ---------------------------------------------------------- submission status
+        with m_sub:
+            st.write("Mark each evaluated return **On time** or **Late**. Every change is recorded with who made it "
+                     "and why.")
+            if not case_info:
+                st.info("No cases yet.")
+            else:
+                q1, q2 = st.columns(2)
+                cs = q1.selectbox("Case", list(case_info), key="sub_case",
+                                  format_func=lambda c: f"{c} - {case_info[c]['title'] or ''}")
+                bsel = q2.selectbox("Batch", ["All batches"] + batches, key="sub_batch")
+                roster = {x["student_id"]: x for x in all_students}
+                evs_c = [e for e in db.evaluations() if e["case_id"] == cs and
+                         (bsel == "All batches" or (roster.get(e["student_id"], {}).get("batch") or "") == bsel)]
+                if not evs_c:
+                    st.info("No evaluated returns for this case and batch yet.")
+                else:
+                    lab = {1: "On time", 0: "Late", None: "Not set"}
+                    base = pd.DataFrame([{"Student ID": e["student_id"], "Name": e.get("name") or "",
+                                          "Batch": e.get("batch") or "", "Score /100": round(100 * (e["pct"] or 0), 1),
+                                          "Submission": lab.get(e.get("on_time"), "Not set")} for e in evs_c])
+                    edited = st.data_editor(
+                        base, hide_index=True, use_container_width=True, key=f"sub_ed_{cs}_{bsel}",
+                        disabled=["Student ID", "Name", "Batch", "Score /100"],
+                        column_config={"Submission": st.column_config.SelectboxColumn(
+                            "Submission", options=["On time", "Late", "Not set"], required=True)})
+                    changed = [(r["Student ID"], r["Submission"]) for (_, r), (_, o) in
+                               zip(edited.iterrows(), base.iterrows()) if r["Submission"] != o["Submission"]]
+                    bad = [sid for sid, v in changed if v == "Not set"]
+                    changes = [(sid, cs, v == "On time") for sid, v in changed if v != "Not set"]
+                    w1, w2 = st.columns([1, 2])
+                    who = w1.text_input("Your name", value=staff or "", key="sub_who")
+                    why = w2.text_input("Reason for the change", key="sub_why",
+                                        placeholder="e.g. uploaded after the deadline; OneDrive time stamp checked")
+                    if bad:
+                        st.warning("A status can be changed to On time or Late, not back to 'Not set'.")
+                    if st.button(f"Save {len(changes)} change(s)", type="primary",
+                                 disabled=not changes or not who.strip() or not why.strip()):
+                        n = db.set_on_time(changes, who.strip(), why.strip())
+                        st.success(f"{n} status(es) changed.")
+                        st.rerun()
+                    if changes and (not who.strip() or not why.strip()):
+                        st.caption("Enter your name and a reason to save.")
+                    unset = [r["Student ID"] for _, r in base.iterrows() if r["Submission"] == "Not set"]
+                    if unset and st.button(f"Mark all {len(unset)} 'Not set' returns in this list as On time",
+                                           disabled=not who.strip() or not why.strip(),
+                                           help="For returns evaluated before submission status existed. "
+                                                "Uses the name and reason above."):
+                        n = db.set_on_time([(sid, cs, True) for sid in unset], who.strip(), why.strip())
+                        st.success(f"{n} status(es) set to On time.")
+                        st.rerun()
+                hist = db.status_history(case_id=cs)
+                with st.expander(f"Change history for {cs} ({len(hist)})"):
+                    if hist:
+                        h = pd.DataFrame(hist)
+                        h["changed_at"] = h["changed_at"].str[:16] + " UTC"
+                        st.dataframe(h.rename(columns={"student_id": "Student ID", "old_status": "From",
+                                                       "new_status": "To", "changed_by": "Changed by",
+                                                       "reason": "Reason", "changed_at": "When"})
+                                     [["When", "Student ID", "From", "To", "Changed by", "Reason"]], hide_index=True)
+                    else:
+                        st.write("No changes yet.")
+
+        # ---------------------------------------------------------- MCQ marks
+        with m_mcq:
+            st.write(f"Upload the MCQ marks as Excel or CSV: a **Student ID** column, and one column per test named "
+                     f"**Test 1** ... **Test {cfg['n_mcq']:g}** (marks out of {cfg['mcq_out_of']:g}). Blank cells are "
+                     "left as they are, so a sheet can hold only the tests written so far. Uploading a mark again "
+                     "replaces it.")
+            up = st.file_uploader("MCQ marks file", type=["xlsx", "csv"], key="mcq_file")
+            tno = st.selectbox("If the sheet has a single 'Marks' column, which test is it?",
+                               list(range(1, int(cfg["n_mcq"]) + 1)), key="mcq_tno")
+            if up is not None:
+                try:
+                    raw = io.BytesIO(up.getvalue())
+                    mdf = pd.read_csv(raw, dtype=str) if up.name.lower().endswith(".csv") else pd.read_excel(raw)
+                    recs = parse_mcq(mdf, cfg, test_no=tno)
+                except MCQError as e:
+                    st.error(str(e))
+                    recs = []
+                except Exception:
+                    log.exception("reading MCQ file failed")
+                    st.error("This file could not be read. Save it as .xlsx or .csv and try again.")
+                    recs = []
+                if recs:
+                    known = {x["student_id"] for x in all_students}
+                    unknown = sorted({sid for sid, _, _ in recs} - known)
+                    tests = sorted({t for _, t, _ in recs})
+                    st.write(f"**{len(recs)}** marks for **{len({r[0] for r in recs})}** students, "
+                             f"test(s) {', '.join(map(str, tests))}.")
+                    if unknown:
+                        st.warning(f"{len(unknown)} student ID(s) are not on the roster and will be saved anyway "
+                                   f"(they show in results once added to the roster): {', '.join(unknown[:15])}"
+                                   + (" ..." if len(unknown) > 15 else ""))
+                    if st.button("Save MCQ marks", type="primary"):
+                        db.save_mcq(recs, staff or "")
+                        st.success(f"{len(recs)} marks saved.")
+            cur = db.mcq_scores()
+            if cur:
+                wide = (pd.DataFrame(cur).pivot_table(index="student_id", columns="test_no", values="marks")
+                        .rename(columns=lambda t: f"Test {t}").reset_index().rename(columns={"student_id": "Student ID"}))
+                names = {x["student_id"]: (x["name"] or "", x["batch"] or "") for x in all_students}
+                wide.insert(1, "Name", wide["Student ID"].map(lambda x: names.get(x, ("", ""))[0]))
+                wide.insert(2, "Batch", wide["Student ID"].map(lambda x: names.get(x, ("", ""))[1]))
+                st.dataframe(wide, hide_index=True, use_container_width=True)
+
+        # ---------------------------------------------------------- settings
+        with m_cfg:
+            can_edit = bool(ss.get("admin_ok"))
+            if not can_edit:
+                st.caption("Changing these needs the admin password - unlock it under **Data management**.")
+            with st.form("cfg_form"):
+                vals = {}
+                cols = st.columns(2)
+                for i, (k_, lab_) in enumerate(LABELS.items()):
+                    vals[k_] = cols[i % 2].number_input(lab_, value=float(cfg[k_]), min_value=0.0, step=1.0,
+                                                        disabled=not can_edit, key=f"cfg_{k_}")
+                pick = st.multiselect("Cases that are the course's mock returns (counted in the final score)",
+                                      list(case_info), default=fcases, disabled=not can_edit,
+                                      format_func=lambda c: f"{c} - {case_info[c]['title'] or ''}")
+                if st.form_submit_button("Save settings", disabled=not can_edit):
+                    newcfg = {k_: (int(v) if float(v).is_integer() else v) for k_, v in vals.items()}
+                    errs = check_settings(newcfg)
+                    if errs:
+                        st.error(" ".join(errs))
+                    else:
+                        db.save_settings(newcfg)
+                        db.set_final_cases(pick)
+                        st.success("Settings saved.")
+                        st.rerun()
 
 # ------------------------------------------------------------------ integrity checks
 with t_integ:
@@ -761,8 +981,24 @@ each case, and gives every student a Simandhar-branded evaluation report with a 
 - Amounts on lines that should be blank ("unexpected entries") deduct the marks set in the key.
 - A form that is missing from the upload makes all of its items wrong.
 
+### Final course score (Management dashboard)
+| Part | Marks | How |
+|---|---|---|
+| Return accuracy | 60 | average score of the 12 mock returns; a return not submitted counts 0 |
+| On-time submission | 20 | 20 / 12 = 1.67 marks for each return submitted on time; a late return earns none |
+| MCQ tests | 20 | total of the 4 tests (50 marks each) out of 200 |
+
+**Pass mark: 70.** These numbers can be changed under *Scoring settings* (admin password).
+- **On time or late** is chosen when you evaluate: for one return, or for the whole batch with a list of exceptions.
+  Re-evaluating a return keeps its status. Staff and admin can change it later under *Submission status*;
+  every change records who made it, why and when.
+- **MCQ marks**: upload an Excel/CSV with *Student ID* and *Test 1* ... *Test 4* columns under *MCQ test marks*.
+- **Final results**: *Progress so far* counts only the returns and tests a batch has done (scaled to 100) and shows
+  who is at risk; *Final* counts everything, missing work as 0. Download the results in Excel and a
+  Simandhar-branded scorecard PDF for each student.
+- Under *Scoring settings*, tick only the cases that are the course's mock returns, so practice cases don't count.
+
 ### Other tabs
-- **Management dashboard**: being rebuilt. New management reports will be added here.
 - **Integrity checks**: compares returns of the same case for copied or shared files, files saved over another
   student's work, the same unusual wrong answers and identical typing habits.
 - **Data management** *(admin password)*: erase a case's results, a whole case, a batch, a student, or everything.

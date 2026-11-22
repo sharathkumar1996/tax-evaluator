@@ -25,12 +25,28 @@ results exist only in the open browser tab.
 | `bulk.py` | Groups a bulk upload (PDFs / zips) into one return per student, with zip safety limits |
 | `report_pdf.py` | Builds the student PDF report |
 | `db.py` | Saves students, batches, case keys, scores and mistakes (Neon Postgres) |
+| `finalscore.py` | Final course score (accuracy + on-time + MCQ), MCQ sheet reading |
+| `scorecard.py` | Final scorecard PDF and results workbook |
 | `metrics.py` | Per-return figures saved with each evaluation; rebuilding a saved report |
 | `pdf_common.py` | Shared branded PDF styles (used by the integrity report) |
 | `answer_key_template.xlsx` | Blank key for trainers (downloadable inside the app) |
 | `make_keys.py` | Template builder and the 'build key from a correct return' function |
 | `requirements.txt`, `.streamlit/config.toml` | Deployment settings |
 | `tests/` | Automated tests (`python -m pytest tests`), with a blank 2025 Form 1040 as a test form |
+
+
+## Final course score
+
+Management dashboard → *Final results*: return accuracy 60 (average of the 12 mock returns, missing = 0) +
+on-time submission 20 (1.67 per return on time, late = 0) + MCQ tests 20 (4 tests × 50 marks). Pass mark 70.
+All of these are settings (`finalscore.DEFAULTS`, changed in the app with the admin password).
+
+- On-time status is chosen when evaluating (single, or per batch with exceptions), kept on re-evaluation, and
+  editable later by staff and admin with a change history (`submission_log`).
+- MCQ marks: Excel/CSV with *Student ID* and *Test 1..4* columns (or one *Marks* column plus the test number).
+- Views: *Progress so far* (only what the batch has done, scaled to 100, "On track / At risk") and *Final*.
+- Downloads: results workbook (results, scoring settings, status changes) and a branded scorecard PDF per student
+  (`scorecard.py`).
 
 ## Deploy for free on Streamlit Community Cloud (about 15 minutes)
 

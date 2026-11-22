@@ -104,6 +104,29 @@ MIGRATIONS = [
             detail TEXT,
             PRIMARY KEY (student_id, case_id, kind, value))""",
          "CREATE INDEX IF NOT EXISTS ix_fp_match ON fingerprints (case_id, kind, value)"]),
+    # final course score: on-time submission per return (1 / 0 / NULL = not set), its change history,
+    # MCQ test marks, scoring settings and which cases are the course's mock returns
+    (4, [("add_column", "evaluations", "on_time", "INTEGER"),
+         ("add_column", "cases", "in_final", "INTEGER"),
+         """CREATE TABLE IF NOT EXISTS submission_log (
+            student_id TEXT NOT NULL,
+            case_id TEXT NOT NULL,
+            old_status TEXT,
+            new_status TEXT,
+            changed_by TEXT,
+            reason TEXT,
+            changed_at TEXT)""",
+         "CREATE INDEX IF NOT EXISTS ix_sublog ON submission_log (case_id, student_id)",
+         """CREATE TABLE IF NOT EXISTS mcq_scores (
+            student_id TEXT NOT NULL,
+            test_no INTEGER NOT NULL,
+            marks REAL,
+            uploaded_at TEXT,
+            uploaded_by TEXT,
+            PRIMARY KEY (student_id, test_no))""",
+         """CREATE TABLE IF NOT EXISTS settings (
+            name TEXT PRIMARY KEY,
+            value TEXT)"""]),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 TRANSIENT = ("OperationalError", "InterfaceError", "PoolTimeout", "ConnectionTimeout")
@@ -320,8 +343,10 @@ class DB:
         return {r["student_id"] for r in self.rows("SELECT student_id FROM evaluations WHERE case_id = ?", (case_id,))}
 
     def save_evaluation(self, sid, case_id, file_name, m, rows, key_hash, by, source_format="", notes="",
-                        fingerprints=None):
-        """m: metrics dict from metrics.return_metrics; rows: graded rows. Saved atomically."""
+                        fingerprints=None, on_time=None):
+        """m: metrics dict from metrics.return_metrics; rows: graded rows. Saved atomically.
+        on_time: True / False sets the submission status; None keeps the status already saved (re-evaluating
+        a return never resets it)."""
         keep = [r for r in rows if r["Result"] != "Correct" or r.get("Needs Review")]
         mistakes = [(sid, case_id, int(r["Step"]), r["Category"], str(r["Form"]), str(r["Line"]), r["Description"],
                      _to_text(r["Correct Value"]), _to_text(r["Student Value"]), r["Marks"], r["Awarded"], r["Result"],
@@ -329,20 +354,24 @@ class DB:
                     for r in keep]
 
         def write(c):
+            if on_time is not None:
+                self._log_status(c, sid, case_id, bool(on_time), by, "set while evaluating")
             c.execute("""INSERT INTO evaluations (student_id, case_id, file_name, score, out_of, pct, file_ready, bottom_line,
                         errors, critical_errors, unexpected, needs_review, key_hash, evaluated_at, evaluated_by,
-                        source_format, reader_notes)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        source_format, reader_notes, on_time)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT (student_id, case_id) DO UPDATE SET file_name = excluded.file_name, score = excluded.score,
                         out_of = excluded.out_of, pct = excluded.pct, file_ready = excluded.file_ready,
                         bottom_line = excluded.bottom_line, errors = excluded.errors,
                         critical_errors = excluded.critical_errors, unexpected = excluded.unexpected,
                         needs_review = excluded.needs_review, key_hash = excluded.key_hash,
                         evaluated_at = excluded.evaluated_at, evaluated_by = excluded.evaluated_by,
-                        source_format = excluded.source_format, reader_notes = excluded.reader_notes""",
+                        source_format = excluded.source_format, reader_notes = excluded.reader_notes,
+                        on_time = COALESCE(excluded.on_time, evaluations.on_time)""",
                       (sid, case_id, file_name[:500], m["score"], m["out_of"], m["pct"], int(m["file_ready"]),
                        None if m["bottom_line"] is None else int(m["bottom_line"]), m["errors"], m["critical_errors"],
-                       m["unexpected"], m["needs_review"], key_hash, now(), by, source_format, (notes or "")[:2000]))
+                       m["unexpected"], m["needs_review"], key_hash, now(), by, source_format, (notes or "")[:2000],
+                       None if on_time is None else int(bool(on_time))))
             c.execute("DELETE FROM mistakes WHERE student_id = ? AND case_id = ?", (sid, case_id))
             if mistakes:
                 c.executemany("""INSERT INTO mistakes (student_id, case_id, step, category, form, line, description,
@@ -351,6 +380,88 @@ class DB:
             if fingerprints is not None:
                 self._write_fingerprints(c, sid, case_id, fingerprints)
         self.tx(write)
+
+    # ------------------------------------------------------------ on-time submission
+    @staticmethod
+    def _status(v):
+        return "Not set" if v is None else ("On time" if int(v) else "Late")
+
+    def _log_status(self, c, sid, case_id, on_time, by, reason):
+        """Record a status change (only when it really changes) in submission_log."""
+        r = c.fetch("SELECT on_time FROM evaluations WHERE student_id = ? AND case_id = ?", (sid, case_id))
+        if not r:
+            return True                      # first evaluation of this return: nothing to record yet
+        old = r[0]["on_time"]
+        if old is not None and int(old) == int(on_time):
+            return False
+        c.execute("INSERT INTO submission_log (student_id, case_id, old_status, new_status, changed_by, reason, "
+                  "changed_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                  (sid, case_id, self._status(old), self._status(on_time),
+                   (by or "")[:100], (reason or "")[:300], datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")))
+        return True
+
+    def set_on_time(self, changes, by, reason):
+        """changes: list of (student_id, case_id, True/False). Only evaluated returns can be changed.
+        All changes are saved together; returns how many statuses actually changed."""
+        def f(c):
+            n = 0
+            for sid, case_id, ok in changes:
+                if not c.fetch("SELECT 1 AS x FROM evaluations WHERE student_id = ? AND case_id = ?", (sid, case_id)):
+                    continue
+                if self._log_status(c, sid, case_id, bool(ok), by, reason):
+                    c.execute("UPDATE evaluations SET on_time = ? WHERE student_id = ? AND case_id = ?",
+                              (int(bool(ok)), sid, case_id))
+                    n += 1
+            return n
+        return self.tx(f)
+
+    def status_history(self, case_id=None, student_id=None, limit=500):
+        sql, p = "SELECT * FROM submission_log WHERE 1 = 1", []
+        if case_id:
+            sql += " AND case_id = ?"
+            p.append(case_id)
+        if student_id:
+            sql += " AND student_id = ?"
+            p.append(student_id)
+        return self.rows(sql + f" ORDER BY changed_at DESC LIMIT {int(limit)}", tuple(p))
+
+    # ------------------------------------------------------------ MCQ tests
+    def save_mcq(self, recs, by):
+        """recs: list of (student_id, test_no, marks). Replaces those (student, test) marks."""
+        t = now()
+        self.many("""INSERT INTO mcq_scores (student_id, test_no, marks, uploaded_at, uploaded_by) VALUES (?, ?, ?, ?, ?)
+                     ON CONFLICT (student_id, test_no) DO UPDATE SET marks = excluded.marks,
+                     uploaded_at = excluded.uploaded_at, uploaded_by = excluded.uploaded_by""",
+                  [(s, int(n), float(m), t, (by or "")[:100]) for s, n, m in recs])
+
+    def mcq_scores(self):
+        return self.rows("SELECT student_id, test_no, marks, uploaded_at, uploaded_by FROM mcq_scores "
+                         "ORDER BY student_id, test_no")
+
+    def erase_mcq_test(self, test_no):
+        self.run("DELETE FROM mcq_scores WHERE test_no = ?", (int(test_no),))
+
+    # ------------------------------------------------------------ settings / mock returns in the final score
+    def settings(self):
+        return {r["name"]: r["value"] for r in self.rows("SELECT name, value FROM settings")}
+
+    def save_settings(self, values):
+        self.many("INSERT INTO settings (name, value) VALUES (?, ?) ON CONFLICT (name) DO UPDATE SET value = excluded.value",
+                  [(k, str(v)) for k, v in values.items()])
+
+    def set_final_cases(self, case_ids):
+        """The cases that are the course's mock returns (counted in the final score)."""
+        keep = set(case_ids)
+
+        def f(c):
+            for r in c.fetch("SELECT case_id FROM cases"):
+                c.execute("UPDATE cases SET in_final = ? WHERE case_id = ?", (int(r["case_id"] in keep), r["case_id"]))
+        self.tx(f)
+
+    def final_cases(self):
+        """Cases counted in the final score; a case never set either way counts (NULL = yes)."""
+        return [r["case_id"] for r in self.rows("SELECT case_id FROM cases WHERE in_final IS NULL OR in_final = 1 "
+                                                "ORDER BY case_id")]
 
     # ------------------------------------------------------------ integrity fingerprints
     @staticmethod
@@ -394,6 +505,7 @@ class DB:
         def f(c):
             c.execute("DELETE FROM mistakes WHERE student_id = ? AND case_id = ?", (sid, case_id))
             c.execute("DELETE FROM fingerprints WHERE student_id = ? AND case_id = ?", (sid, case_id))
+            c.execute("DELETE FROM submission_log WHERE student_id = ? AND case_id = ?", (sid, case_id))
             c.execute("DELETE FROM evaluations WHERE student_id = ? AND case_id = ?", (sid, case_id))
         self.tx(f)
 
@@ -412,6 +524,7 @@ class DB:
         def f(c):
             c.execute("DELETE FROM fingerprints WHERE case_id = ? AND student_id <> '#TRAINER'", (case_id,))
             c.execute("DELETE FROM mistakes WHERE case_id = ?", (case_id,))
+            c.execute("DELETE FROM submission_log WHERE case_id = ?", (case_id,))
             c.execute("DELETE FROM evaluations WHERE case_id = ?", (case_id,))
         self.tx(f)
 
@@ -420,6 +533,7 @@ class DB:
         def f(c):
             c.execute("DELETE FROM fingerprints WHERE case_id = ?", (case_id,))
             c.execute("DELETE FROM mistakes WHERE case_id = ?", (case_id,))
+            c.execute("DELETE FROM submission_log WHERE case_id = ?", (case_id,))
             c.execute("DELETE FROM evaluations WHERE case_id = ?", (case_id,))
             c.execute("DELETE FROM cases WHERE case_id = ?", (case_id,))
         self.tx(f)
@@ -429,6 +543,8 @@ class DB:
         def f(c):
             c.execute("DELETE FROM mistakes WHERE student_id = ?", (sid,))
             c.execute("DELETE FROM fingerprints WHERE student_id = ?", (sid,))
+            c.execute("DELETE FROM submission_log WHERE student_id = ?", (sid,))
+            c.execute("DELETE FROM mcq_scores WHERE student_id = ?", (sid,))
             c.execute("DELETE FROM evaluations WHERE student_id = ?", (sid,))
             c.execute("DELETE FROM students WHERE student_id = ?", (sid,))
         self.tx(f)
@@ -440,6 +556,8 @@ class DB:
         def f(c):
             c.execute(f"DELETE FROM mistakes WHERE student_id IN ({sub})", (batch,))
             c.execute(f"DELETE FROM fingerprints WHERE student_id IN ({sub})", (batch,))
+            c.execute(f"DELETE FROM submission_log WHERE student_id IN ({sub})", (batch,))
+            c.execute(f"DELETE FROM mcq_scores WHERE student_id IN ({sub})", (batch,))
             c.execute(f"DELETE FROM evaluations WHERE student_id IN ({sub})", (batch,))
             if roster_too:
                 c.execute("DELETE FROM students WHERE batch = ?", (batch,))
@@ -452,12 +570,14 @@ class DB:
         def f(c):
             c.execute(f"DELETE FROM mistakes WHERE student_id NOT IN ({sub})")
             c.execute(f"DELETE FROM fingerprints WHERE student_id NOT IN ({sub}) AND student_id <> '#TRAINER'")
+            c.execute(f"DELETE FROM submission_log WHERE student_id NOT IN ({sub})")
+            c.execute(f"DELETE FROM mcq_scores WHERE student_id NOT IN ({sub})")
             c.execute(f"DELETE FROM evaluations WHERE student_id NOT IN ({sub})")
         self.tx(f)
 
     def erase_all(self):
         def f(c):
-            for t in ("mistakes", "fingerprints", "evaluations", "students", "cases"):
+            for t in ("mistakes", "fingerprints", "submission_log", "mcq_scores", "evaluations", "students", "cases"):
                 c.execute(f"DELETE FROM {t}")
         self.tx(f)
 
