@@ -92,6 +92,7 @@ class Widget:
     state: str = ""     # check box: its "on" appearance name
     value: object = None  # text: str; check: bool
     parent_id: int = 0
+    source: str = ""     # where a value came from when not the field itself: "appearance" / "xfa"
 
     @property
     def cy(self):
@@ -100,6 +101,83 @@ class Widget:
     @property
     def cx(self):
         return (self.x0 + self.x1) / 2
+
+
+def _appearance_text(annot):
+    """Text drawn in a box's appearance (what the student sees), for files whose program did not
+    store the typed value in the field itself."""
+    try:
+        from pypdf.generic import ContentStream
+        ap = annot["/AP"]["/N"].get_object()
+        if not hasattr(ap, "get_data"):
+            return ""
+        ops = ContentStream(ap, None).operations
+    except Exception:
+        return ""
+    parts = []
+    for operands, op in ops:
+        if op in (b"Tj", b"'", b'"'):
+            parts.append(str(operands[-1]))
+        elif op == b"TJ":
+            parts.append("".join(str(x) for x in operands[0] if not isinstance(x, (int, float))
+                                 and not hasattr(x, "as_numeric")))
+        elif op in (b"Td", b"TD", b"T*", b"Tm") and parts and not parts[-1].endswith(" "):
+            parts.append(" ")
+    return re.sub(r"\s+", " ", "".join(parts)).strip()
+
+
+def _xfa_values(reader):
+    """{field path with indexes: value} from the XFA data copy that IRS forms carry. Some PDF programs
+    update only this copy."""
+    try:
+        import xml.etree.ElementTree as ET
+        xfa = reader.trailer["/Root"]["/AcroForm"]["/XFA"]
+        xml = None
+        for i in range(0, len(xfa) - 1, 2):
+            if str(xfa[i]) == "datasets":
+                xml = xfa[i + 1].get_object().get_data()
+        if not xml:
+            return {}
+        root = ET.fromstring(xml)
+    except Exception:
+        return {}
+    out = {}
+    data = next((e for e in root.iter() if e.tag.split("}")[-1] == "data"), None)
+    if data is None:
+        return out
+
+    def walk(el, path):
+        counts = {}
+        for ch in el:
+            tag = ch.tag.split("}")[-1]
+            i = counts.get(tag, 0)
+            counts[tag] = i + 1
+            p = f"{path}.{tag}[{i}]" if path else f"{tag}[{i}]"
+            if len(ch):
+                walk(ch, p)
+            elif (ch.text or "").strip():
+                out[p] = ch.text.strip()
+    walk(data, "")
+    return out
+
+
+def _xfa_lookup(values):
+    """The XFA copy leaves out some levels of the field name (e.g. 'Page1[0]'), so a box is matched by
+    the longest end of its name that points to exactly one XFA entry."""
+    by_suffix = {}
+    for path, v in values.items():
+        segs = path.split(".")
+        for i in range(len(segs)):
+            by_suffix.setdefault(".".join(segs[i:]), []).append(v)
+
+    def get(name):
+        segs = name.split(".")
+        for i in range(len(segs)):
+            hit = by_suffix.get(".".join(segs[i:]))
+            if hit:
+                return hit[0] if len(hit) == 1 else None
+        return None
+    return get
 
 
 def _widgets(page):
@@ -171,6 +249,9 @@ def _widgets(page):
             if isinstance(v, list):
                 v = ", ".join(str(x) for x in v)
             w.value = "" if v is None else str(v).strip()
+            if not w.value:                   # some PDF programs save what was typed only as the box's look
+                w.value = _appearance_text(a)
+                w.source = "appearance" if w.value else ""
         if w.key in seen:            # same field shown twice on one page: keep the first
             continue
         seen[w.key] = True
@@ -336,6 +417,18 @@ FIXED_DESC = {"SCH SE": {
     "9": "Line 7 minus line 8d", "10": "Social security portion (12.4%)", "11": "Medicare portion (2.9%)",
     "12": "Self-employment tax", "13": "Deduction for one-half of self-employment tax",
     "15": "Farm optional method", "16": "Line 14 minus line 15", "17": "Nonfarm optional method"}}
+
+
+def _old_8949_name(f, ln):
+    """Answer keys drafted before Form 8949 was calibrated (Nov 2026) used other names:
+    page 2 (Part II) rows were Form '8949' line '3 (d)', and page 1 (Part I) was read as a form named
+    after the tax year ('2025'). Translate them to today's names so those keys keep working."""
+    m = re.fullmatch(r"(\d{1,2}) \(([a-h])\)", ln)
+    if f == "8949" and m:
+        return f, f"ii 1 row {m.group(1)} ({m.group(2)})"
+    if re.fullmatch(r"20[1-3]\d", f):
+        return "8949", (f"i 1 row {m.group(1)} ({m.group(2)})" if m else ln)
+    return f, ln
 
 
 F8949_COLS = "abcdefgh"
@@ -821,6 +914,22 @@ class IRSReturn:
             except Exception as e:
                 raise ReaderError(f"{fname} is damaged and could not be read ({type(e).__name__}). "
                                   "Ask the student to save the form again and re-upload it.")
+            # Use the XFA copy only when the program stored nothing in the boxes themselves; otherwise a
+            # stale XFA figure could bring back an entry the student later cleared.
+            if not any(w.kind != "check" and w.value and not w.source for ws in page_widgets for w in ws):
+                xv = _xfa_lookup(_xfa_values(rd))
+                for ws in page_widgets:
+                    for w in ws:
+                        if w.kind != "check" and not w.value:
+                            v = xv(w.name)
+                            if v:
+                                w.value, w.source = v, "xfa"
+            fallback = sum(1 for ws in page_widgets for w in ws if w.source)
+            if fallback:
+                self.notes.append(f"{fname}: {fallback} entr{'y was' if fallback == 1 else 'ies were'} not saved in "
+                                  "the form's boxes by the student's PDF program and were read from the page instead. "
+                                  "Check 'What the system read'; ask the student to fill and save the form in "
+                                  "Adobe Acrobat Reader next time.")
             if not any(page_widgets):
                 # A printed / flattened copy holds no readable entries. Skipping it keeps it from taking
                 # the place of the real (fillable) copy of the same form.
@@ -877,6 +986,7 @@ class IRSReturn:
                               "fillable IRS form, fill it in, save it (File > Save) and upload the saved file.")
         if not self.copies:
             raise ReaderError("No IRS form pages were recognised in the uploaded file(s).")
+        self._drop_blank_duplicates(counts)
         multi = sorted(f"{f} ({n} copies)" for f, n in counts.items() if n > 1)
         if multi:
             self.notes.append("Forms appearing more than once: " + ", ".join(multi) + ". Each copy is marked as "
@@ -890,6 +1000,35 @@ class IRSReturn:
         if not self.all_fields():
             self.notes.append("No entries were found on any form - the forms look blank. If the student filled "
                               "them in, they were probably not saved (File > Save) before uploading.")
+
+    def _drop_blank_duplicates(self, counts):
+        """A blank copy of a form uploaded next to the filled one must not be marked in its place."""
+        def has_data(c):
+            return any(w.value for wmap in c.widgets for w in wmap.values())
+        for form in [f for f, n in counts.items() if n > 1]:
+            group = sorted((c for (f, _), c in self.copies.items() if f == form), key=lambda c: c.instance)
+            keep = [c for c in group if has_data(c)]
+            blank = [c for c in group if not has_data(c)]
+            if not keep or not blank:
+                continue
+            files = sorted({fn for c in blank for fn, _ in c.pages})
+            self.notes.append(f"{', '.join(files)}: a blank copy of {form} was uploaded together with a filled one - "
+                              "the blank copy was not marked.")
+            old = {}
+            for c in group:
+                del self.copies[(form, c.instance)]
+                old[c.instance] = c
+            for c in blank:
+                c.instance = 0
+            for i, c in enumerate(keep, 1):
+                c.instance = i
+                self.copies[(form, i)] = c
+            counts[form] = len(keep)
+            label = {f"{form} #{n}" if n > 1 else form: (c.form if c.instance == 1 else
+                     f"{c.form} #{c.instance}" if c.instance else "(blank copy - not marked)") for n, c in old.items()}
+            pages = {(fn, p): c for c in group for fn, p in c.pages}
+            self.page_map = [(where, label.get(f, f) if (where.rsplit(" p", 1)[0], int(where.rsplit(" p", 1)[1]))
+                              in pages else f) for where, f in self.page_map]
 
     # ---------------------------------------------------------------- helpers
     def forms_found(self):
@@ -989,6 +1128,7 @@ class IRSReturn:
         f, inst = norm_form(form)
         raw = str(line or "").strip()
         ln = norm_line(raw)
+        f, ln = _old_8949_name(f, ln)
         copy = self.copies.get((f, inst))
         name = f if inst == 1 else f"{f} #{inst}"
         if copy is None:

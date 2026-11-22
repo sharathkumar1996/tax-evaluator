@@ -143,3 +143,14 @@ def test_schedule_se_reads_a_filled_return():
     for k in ("2", "4a", "6", "8a", "10", "11", "12", "13"):
         assert r.value("SCH SE", k)[0] == float(vals[k].replace(",", ""))
     assert r.unlinked() == []
+
+
+def test_8949_keys_made_before_calibration_still_work():
+    """Old keys: Part II rows were '8949' line '1 (d)'; Part I was a form named after the year ('2025')."""
+    lines, _ = LAYOUT["8949"]
+    d = fill(BLANK["8949"], {lines["II 1 row 1 (d)"]: "2600", lines["II 1 row 1 (b)"]: "02/10/2024",
+                             lines["I 1 row 3 (h)"]: "100"})
+    r = IRSReturn([("x.pdf", d)])
+    assert r.value("8949", "1 (d)")[0] == 2600
+    assert r.value("8949", "1 (b)")[0] == "02/10/2024"
+    assert r.value("2025", "3 (h)")[0] == 100
