@@ -13,6 +13,9 @@ When the case (and ideally the roster) is known, names that students get slightl
 matched, and every such match is reported as a warning on that student's row so it can be checked:
   164108-M01, "164231 _M01", "164233_M01 1" (OneDrive's copy suffix), Ravi_164236_M01, M01_164234,
   164237_M1 (= M01), a folder named only 164235 (no mock code), "Emp id164244.pdf".
+With the roster, a folder or file carrying the student's NAME instead of the ID is accepted too
+("Ravi Kumar", "Ravi_Kumar_M01", "kumar ravi - mock 1.pdf"), as long as the name points to exactly one
+student on the roster. Such matches always carry a warning asking for StudentID_CaseID naming.
 Student folders with no PDF in them (empty, only a zip/images/Word files) are reported as skipped,
 so a student who uploaded the wrong thing is not silently treated as "not submitted".
 
@@ -34,6 +37,10 @@ FOLDER = re.compile(r"^([A-Za-z0-9-]+)_([A-Za-z0-9-]+)$")
 FILE = re.compile(r"^([A-Za-z0-9-]+)_([A-Za-z0-9-]+)(?:_[^/]*)?\.pdf$", re.I)
 CASE_LIKE = re.compile(r"^[A-Z]{1,3}-?\d{1,3}$")
 MIN_ID_DIGITS = 5        # without a roster, a bare number must be this long to count as a student ID
+# words in folder / file names that are never part of a student's name
+NOT_NAME = {"mock", "mocks", "return", "returns", "form", "forms", "schedule", "sch", "final", "copy", "pdf", "irs",
+            "tax", "case", "batch", "submission", "submissions", "assignment", "fillable", "filled", "new", "old",
+            "revised", "updated", "and", "the", "of", "my", "test", "draft", "emp", "id", "empid", "student"}
 
 
 @dataclass
@@ -122,12 +129,62 @@ def _entries(name, data, depth=0, prefix=""):
             yield path, None, "other"
 
 
+def _words(text):
+    """Lower-case name words of a text: letters only, 2+ long, not mock/form/... words."""
+    t = re.sub(r"([a-z])([A-Z])", r"\1 \2", str(text or ""))           # RaviKumar -> Ravi Kumar
+    return {w for w in re.findall(r"[a-z]+", t.lower()) if len(w) >= 2 and w not in NOT_NAME}
+
+
+def _case_in(text, case_id):
+    """A mock code in a name: 'M01', 'm-1' or 'mock 1' (read with the current case's letters)."""
+    for t in re.findall(r"[A-Za-z]+-?\d+", text):
+        if CASE_LIKE.match(t.upper()):
+            return t.upper()
+    m = re.search(r"mock\s*[-_#]?\s*0*(\d{1,3})", text, re.I)
+    if m:
+        letters = re.match(r"[A-Z]*", case_id or "").group(0) or "M"
+        return f"{letters}{int(m.group(1)):02d}"
+    return None
+
+
 class _Namer:
     """Finds (student ID, case ID, warning) in a folder or file name."""
 
     def __init__(self, case_id=None, roster_ids=None):
         self.case = (case_id or "").upper() or None
+        names = roster_ids if isinstance(roster_ids, dict) else {}
         self.roster = {str(x).strip().upper() for x in (roster_ids or []) if str(x).strip()}
+        self.names = {}                                   # student ID -> set of name words
+        self.ambiguous = {}                               # name text -> the students it could be
+        for sid, nm in names.items():
+            w = _words(nm)
+            if w:
+                self.names[str(sid).strip().upper()] = w
+
+    def by_name(self, text, is_file):
+        """(sid, case, warning) when the name in text points to exactly one roster student; else None.
+        Full name (every word, any order) first; then a single unusual word of the name (>= 4 letters)."""
+        if not self.case or not self.names:
+            return None
+        stem = text[:-4] if is_file and text.lower().endswith(".pdf") else text
+        words = _words(stem)
+        if not words:
+            return None
+        full = [sid for sid, w in self.names.items() if w <= words]
+        how = "full name"
+        if not full:
+            full = [sid for sid, w in self.names.items() if any(len(x) >= 3 and x in words for x in w)]
+            how = "part of the name only (check this)"
+        if len(full) > 1:
+            self.ambiguous[text] = sorted(full)
+        if len(full) != 1:
+            return None
+        sid = full[0]
+        case = _case_in(stem, self.case)
+        if case and not same_case(case, self.case):
+            return sid, case, None                                                     # another mock
+        return sid, self.case, (f"name '{text}' has no student ID - matched to {sid} by {how}; ask the student "
+                                f"to name it {sid}_{self.case}")
 
     def _fix_case(self, case):
         if self.case and case != self.case and same_case(case, self.case):
@@ -150,6 +207,10 @@ class _Namer:
                 if len(found) == 1 and found[0] != sid:
                     id_warn = f"name '{text}': ID {sid} is not on the roster - read as {found[0]}"
                     sid = found[0]
+                elif not found and not re.search(r"\d", sid):                          # EmmaWilson_M01
+                    r = self.by_name(text, is_file)
+                    if r:
+                        return r
         else:
             id_warn = None
         fixed = self._fix_case(case)
@@ -200,6 +261,13 @@ class _Namer:
             if r:
                 return (*r, "/".join(folders[:k + 1]))
         r = self.loose(base, True)
+        if r:
+            return (*r, None)
+        if folders:                                                   # by name: the file's own folder only
+            r = self.by_name(folders[-1], False)
+            if r:
+                return (*r, "/".join(folders))
+        r = self.by_name(base, True)
         return (*r, None) if r else None
 
 
@@ -223,7 +291,13 @@ def group_uploads(uploads, case_id=None, roster_ids=None):
                 continue
             hit = namer.find(path)
             if hit is None:
-                skipped.append((path, "Skipped - name is not StudentID_CaseID.pdf (or a folder StudentID_CaseID)"))
+                parts = path.split("/")
+                amb = namer.ambiguous.get(parts[-2] if len(parts) > 1 else "") or namer.ambiguous.get(parts[-1])
+                why = (f"Skipped - the name matches more than one student ({', '.join(amb)}); rename it "
+                       f"StudentID_{namer.case}" if amb else
+                       "Skipped - no student ID or roster name found; name it StudentID_CaseID.pdf "
+                       "(or a folder StudentID_CaseID)")
+                skipped.append((path, why))
                 continue
             sid, case, warn, owner = hit
             k = (sid.upper(), case.upper())
@@ -251,7 +325,7 @@ def group_uploads(uploads, case_id=None, roster_ids=None):
         ancestors.update("/".join(bits[:k]) for k in range(1, len(bits)))
     for d in sorted(dirs | ancestors, key=lambda x: -x.count("/")):
         name = d.split("/")[-1]
-        hit = namer.strict(name.strip(), False) or namer.loose(name, False)
+        hit = namer.strict(name.strip(), False) or namer.loose(name, False) or namer.by_name(name, False)
         if not hit or any(o == d or o.startswith(d + "/") or d.startswith(o + "/") for o in owners):
             continue
         if any(r.startswith(d + "/") for r in reported):

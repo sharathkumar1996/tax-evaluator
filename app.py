@@ -341,7 +341,8 @@ with t_eval:
                      "`StudentID_CaseID.pdf` (e.g. `S0123_" + k.case_id + ".pdf`). A student "
                      "can have several PDFs, one per form: `S0123_" + k.case_id + "_1040.pdf`, `S0123_" + k.case_id + "_SchC.pdf`, "
                      "or a folder `S0123_" + k.case_id + "` holding them. You can also upload the whole batch "
-                     "folder in one go. Files for another case are skipped.")
+                     "folder in one go. Files for another case are skipped. A folder or file named with the student's "
+                     "ID or roster name in some other way is still accepted, with a warning to check it.")
             bpick = st.radio("Upload", ["PDF / zip files", "A whole folder"], horizontal=True, key="bulk_pick",
                              help="'A whole folder': choose the batch folder (e.g. the OneDrive folder holding one "
                                   "sub-folder per student). Every PDF and zip inside it is uploaded.")
@@ -364,7 +365,8 @@ with t_eval:
             if st.button("Evaluate all", type="primary", disabled=not files):
                 roster = {s_["student_id"]: s_ for s_ in db.students()} if db else {}
                 groups, skipped = group_uploads([(f.name, f.getvalue()) for f in files], case_id=k.case_id,
-                                                roster_ids=list(roster) or None)
+                                                roster_ids={i: (r_.get("name") or "") for i, r_ in roster.items()}
+                                                or None)
                 done = db.evaluated(k.case_id) if (db and skip_done) else set()
                 out, zbuf = [], io.BytesIO()
                 for name, why in skipped:
@@ -420,6 +422,12 @@ with t_eval:
                 st.success(f"{n_ok} evaluated · {int(df['Status'].str.startswith('Skipped').sum())} skipped · "
                            f"{int(df['Status'].str.startswith('Failed').sum())} failed"
                            + (" · all saved to the database" if db else ""))
+                misnamed = df[df["Status"].str.contains("CHECK NAME", na=False)]
+                if len(misnamed):
+                    st.warning(f"{len(misnamed)} student(s) did not name their files `StudentID_{k.case_id}` and were "
+                               "matched by the ID or name found in the folder or file name: "
+                               + ", ".join(f"{r['Student ID']} {r['Name']}".strip() for _, r in misnamed.iterrows())[:600]
+                               + ". Check these rows, and ask the students to name their folders properly next time.")
                 st.dataframe(df, hide_index=True)
                 d1, d2 = st.columns(2)
                 if bo["zip"] and n_ok:
@@ -966,6 +974,8 @@ each case, and gives every student a Simandhar-branded evaluation report with a 
      Check the Student ID (taken from the folder or file name) and name, then press *Evaluate*.
    - **Many returns at once**: upload the PDFs or zip files, or choose **A whole folder** and pick the batch folder
      (one sub-folder per student, named `StudentID_CaseID`). Each student's files are grouped by their name.
+     A folder named differently is still accepted when it holds the student's roster ID or name (e.g. "Ravi Kumar"
+     or "Ravi_Kumar_M01"); the row then says **CHECK NAME**. A name shared by two students is skipped.
      Download all the reports as one zip, and the results as Excel.
    - Evaluating the same student and case again replaces the earlier result.
 4. **Check before sharing**: open *What the system read* when the app asks you to. Items it could not read are marked

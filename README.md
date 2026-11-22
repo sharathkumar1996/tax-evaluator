@@ -136,6 +136,8 @@ Leave Correct Value blank when the box must be empty.
 
 ## Bulk evaluation
 Choose **Many returns at once (bulk)**, then upload several PDFs or zips. Name the files:
+- With the roster loaded, a folder or file named after the student ("Ravi Kumar", "Ravi_Kumar_M01") is accepted
+  with a CHECK NAME warning when the name points to exactly one student.
 - `StudentID_CaseID.pdf`: one PDF per student, or
 - `StudentID_CaseID_<anything>.pdf`: several PDFs per student (e.g. `S0123_C03_1040.pdf`, `S0123_C03_SchC.pdf`), or
 - a folder `StudentID_CaseID` holding that student's PDFs (inside a zip).

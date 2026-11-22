@@ -1,4 +1,5 @@
 """Bulk upload grouping and zip safety limits."""
+import pytest
 import io
 import zipfile
 
@@ -113,3 +114,42 @@ def test_old_behaviour_without_case_is_unchanged():
 
 def test_mock_codes_compare_by_number():
     assert bulk.same_case("M1", "M01") and bulk.same_case("m-01", "M01") and not bulk.same_case("M10", "M01")
+
+
+ROSTER_NAMES = {"164746": "Ravi Kumar", "163316": "Emma Wilson", "165000": "Priya Sharma", "165001": "Sam Lee",
+                "165002": "Ravi Teja"}
+
+
+def _grp(names):
+    return group_uploads([(n, b"%PDF-1.4") for n in names], case_id="M01", roster_ids=ROSTER_NAMES)
+
+
+@pytest.mark.parametrize("path,sid", [
+    ("B1/Ravi Kumar/f1040.pdf", "164746"),
+    ("B1/Ravi_Kumar_M01/f1040.pdf", "164746"),
+    ("B1/kumar ravi - mock 1/f1040.pdf", "164746"),
+    ("B1/Emma Wilson.pdf", "163316"),
+    ("B1/EmmaWilson_M01.pdf", "163316"),
+    ("B1/Mock1 submissions/Priya/f1040.pdf", "165000"),
+    ("B1/Sam/f1040.pdf", "165001"),
+])
+def test_folder_or_file_named_after_the_student_is_accepted_with_a_warning(path, sid):
+    groups, skipped = _grp([path])
+    assert skipped == [] and [(g.student_id, g.case_id) for g in groups] == [(sid, "M01")]
+    assert any("has no student ID" in w and f"{sid}_M01" in w for w in groups[0].warnings)
+
+
+def test_name_matching_more_than_one_student_is_skipped_with_the_reason():
+    groups, skipped = _grp(["B1/RAVI/f1040.pdf"])
+    assert groups == [] and "more than one student (164746, 165002)" in skipped[0][1]
+
+
+def test_unknown_name_is_skipped_and_another_mock_is_kept_apart():
+    groups, skipped = _grp(["B1/Unknown Person/f.pdf", "B1/Emma Wilson M02.pdf", "B1/Emma Wilson - mock 2.pdf"])
+    assert "no student ID or roster name found" in skipped[0][1]
+    assert {(g.student_id, g.case_id) for g in groups} == {("163316", "M02")}
+
+
+def test_proper_names_still_win_and_carry_no_warning():
+    groups, _ = _grp(["B1/164746_M01/f1040.pdf"])
+    assert groups[0].student_id == "164746" and groups[0].warnings == []
