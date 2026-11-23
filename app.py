@@ -320,8 +320,9 @@ with t_eval:
                 with st.spinner("Reading the return and marking it..."):
                     files = [(f.name, f.getvalue()) for f in pdfs]
                     started = datetime.now(timezone.utc)
+                    one_batch = ((db.student(sid) or {}).get("batch") or "") if db else ""
                     one_row = {"File": ", ".join(n for n, _ in files)[:300], "Student ID": sid, "Name": sname or "",
-                               "Submission": sub_one}
+                               "Batch": one_batch, "Submission": sub_one}
                     one_up = [(n, len(d)) for n, d in files]
                     try:
                         res = evaluate_files(files, sid, sname, k)
@@ -1120,7 +1121,9 @@ with t_find:
             st.write("A record of every evaluation run - what was uploaded, and for every file or student whether "
                      "it was evaluated, skipped or failed, and why. The students' PDF reports are not kept here "
                      "(find those under *Student reports*).")
-            h1, h2, h3 = st.columns(3)
+            roster_b = {x["student_id"]: (x["batch"] or "").strip() or "Unassigned" for x in db.students()}
+            NO_STUDENT = "No student identified"
+            h1, h2, h3, h4 = st.columns(4)
             h_case = h1.selectbox("Case", ["All cases"] + [c["case_id"] for c in db.cases()], key="rh_case")
             h_days = h2.selectbox("Period", ["Last 7 days", "Last 30 days", "Last 90 days", "Everything"],
                                   key="rh_days")
@@ -1130,47 +1133,65 @@ with t_find:
                      if days else None)
             runs_ = [r for r in db.runs(case_id=None if h_case == "All cases" else h_case, since=since)
                      if r["kind"] in h_kind]
-            if not runs_:
-                st.info("No evaluation runs in this period.")
-            else:
-                rdf = pd.DataFrame(runs_)
-                tot = rdf[["evaluated", "skipped", "failed", "warnings"]].sum()
-                c = st.columns(4)
-                c[0].metric("Runs", len(rdf))
-                c[1].metric("Evaluated", int(tot["evaluated"]))
-                c[2].metric("Skipped", int(tot["skipped"]))
-                c[3].metric("Failed", int(tot["failed"]))
-                show = rdf.rename(columns={"started_at": "Started (UTC)", "kind": "Type", "case_id": "Case",
-                                           "run_by": "By", "files": "Files uploaded", "evaluated": "Evaluated",
-                                           "skipped": "Skipped", "failed": "Failed", "warnings": "To check"})
-                st.dataframe(show[["Started (UTC)", "Type", "Case", "By", "Files uploaded", "Evaluated", "Skipped",
-                                   "Failed", "To check"]], hide_index=True, use_container_width=True)
 
-                def run_frames(run_ids):
-                    out_rows, out_up = [], []
-                    for rid in run_ids:
-                        meta = next(r for r in runs_ if r["run_id"] == rid)
-                        d = db.run_detail(rid) or {}
-                        tag = {"Run started (UTC)": meta["started_at"], "Type": meta["kind"], "Case": meta["case_id"],
-                               "By": meta["run_by"]}
-                        out_rows += [dict(tag, **r) for r in d.get("rows") or []]
-                        out_up += [dict(tag, File=u[0], Bytes=u[1]) for u in d.get("uploads") or []]
-                        if d.get("options"):
-                            out_up.append(dict(tag, File="(options) " + "; ".join(f"{k_}: {v}" for k_, v in
-                                                                                   d["options"].items()), Bytes=None))
-                    return pd.DataFrame(out_rows), pd.DataFrame(out_up)
+            # every row of every run in the period, each with its batch (from the run, else today's roster)
+            all_rows, all_up = [], []
+            for meta in runs_:
+                d = db.run_detail(meta["run_id"]) or {}
+                tag = {"run_id": meta["run_id"], "Run started (UTC)": meta["started_at"], "Type": meta["kind"],
+                       "Case": meta["case_id"], "By": meta["run_by"]}
+                for r in d.get("rows") or []:
+                    sid_ = str(r.get("Student ID") or "").upper()
+                    b_ = (str(r.get("Batch") or "").strip() or (roster_b.get(sid_) if sid_ else None)
+                          or ("Not on roster" if sid_ else NO_STUDENT))
+                    all_rows.append(dict(tag, **dict(r, Batch=b_)))
+                all_up += [dict(tag, File=u[0], Bytes=u[1]) for u in d.get("uploads") or []]
+                if d.get("options"):
+                    all_up.append(dict(tag, File="(options) " + "; ".join(f"{k_}: {v}" for k_, v in
+                                                                          d["options"].items()), Bytes=None))
+            rows_all = pd.DataFrame(all_rows)
+            batch_opts = sorted(set(rows_all["Batch"])) if not rows_all.empty else []
+            h_batch = h4.multiselect("Batch", batch_opts, default=batch_opts, key="rh_batch",
+                                     help=f"'{NO_STUDENT}' holds the files that could not be matched to anyone.")
+            rows_f = rows_all[rows_all["Batch"].isin(h_batch)] if not rows_all.empty else rows_all
+            if rows_f.empty:
+                st.info("No evaluation runs for these filters.")
+            else:
+                sv_all = rows_f["Status"].astype(str)
+                flags = pd.DataFrame({"run_id": rows_f["run_id"],
+                                      "Evaluated": sv_all.str.startswith("Evaluated"),
+                                      "Skipped": sv_all.str.startswith("Skipped"),
+                                      "Failed": sv_all.str.startswith("Failed"),
+                                      "To check": sv_all.str.contains("CHECK|check", regex=True)})
+                per_run = flags.groupby("run_id").sum().astype(int)
+                shown_runs = [r for r in runs_ if r["run_id"] in per_run.index]
+                c = st.columns(4)
+                c[0].metric("Runs", len(shown_runs))
+                c[1].metric("Evaluated", int(per_run["Evaluated"].sum()))
+                c[2].metric("Skipped", int(per_run["Skipped"].sum()))
+                c[3].metric("Failed", int(per_run["Failed"].sum()))
+                table = pd.DataFrame([{"Started (UTC)": r["started_at"], "Type": r["kind"], "Case": r["case_id"],
+                                       "By": r["run_by"] or "-",
+                                       "Batches": ", ".join(sorted(set(rows_f.loc[rows_f["run_id"] == r["run_id"],
+                                                                                  "Batch"])))[:120],
+                                       "Files uploaded": r["files"], **per_run.loc[r["run_id"]].to_dict()}
+                                      for r in shown_runs])
+                st.dataframe(table, hide_index=True, use_container_width=True)
+                if set(h_batch) != set(batch_opts):
+                    st.caption("Counts cover only the chosen batches.")
 
                 def run_workbook(run_ids):
-                    rows_df, up_df = run_frames(run_ids)
-                    meta = pd.DataFrame([r for r in runs_ if r["run_id"] in run_ids]).drop(columns=["run_id"])
+                    rows_df = rows_f[rows_f["run_id"].isin(run_ids)].drop(columns=["run_id"])
+                    up_df = pd.DataFrame([u for u in all_up if u["run_id"] in run_ids]).drop(
+                        columns=["run_id"], errors="ignore")
+                    meta = table[[r["run_id"] in run_ids for r in shown_runs]]
+                    sv_ = rows_df["Status"].astype(str)
                     buf_ = io.BytesIO()
                     with pd.ExcelWriter(buf_, engine="openpyxl") as xw:
                         meta.to_excel(xw, sheet_name="Runs", index=False)
-                        for nm, df_ in (("Results", rows_df), ("Skipped", rows_df[rows_df["Status"].astype(str)
-                                                                                 .str.startswith("Skipped")]
-                                         if not rows_df.empty else rows_df),
-                                        ("Failed", rows_df[rows_df["Status"].astype(str).str.startswith("Failed")]
-                                         if not rows_df.empty else rows_df),
+                        for nm, df_ in (("Results", rows_df), ("Skipped", rows_df[sv_.str.startswith("Skipped")]),
+                                        ("Failed", rows_df[sv_.str.startswith("Failed")]),
+                                        ("To check", rows_df[sv_.str.contains("CHECK|check", regex=True)]),
                                         ("Uploaded files", up_df)):
                             (df_ if not df_.empty else pd.DataFrame({"": ["None"]})).to_excel(
                                 xw, sheet_name=nm, index=False)
@@ -1182,28 +1203,30 @@ with t_find:
                     return buf_.getvalue()
 
                 stamp = datetime.now().strftime("%Y%m%d_%H%M")
-                st.download_button(f"Download all {len(rdf)} runs shown (Excel)",
-                                   run_workbook([r["run_id"] for r in runs_]), file_name=f"Run_history_{stamp}.xlsx")
+                st.download_button(f"Download all {len(shown_runs)} runs shown (Excel)",
+                                   run_workbook([r["run_id"] for r in shown_runs]),
+                                   file_name=f"Run_history_{stamp}.xlsx")
                 st.divider()
                 pick_run = st.selectbox(
-                    "Open one run", [r["run_id"] for r in runs_], key="rh_pick",
-                    format_func=lambda rid: next(f"{r['started_at']} UTC · {r['kind']} · {r['case_id']} · "
-                                                 f"{r['evaluated']} evaluated, {r['skipped']} skipped, "
-                                                 f"{r['failed']} failed" for r in runs_ if r["run_id"] == rid))
-                rows_df, up_df = run_frames([pick_run])
-                if not rows_df.empty:
-                    status_f = st.radio("Show", ["Everything", "Skipped", "Failed", "To check"], horizontal=True,
-                                        key="rh_show")
-                    sv = rows_df["Status"].astype(str)
-                    view_ = rows_df if status_f == "Everything" else rows_df[
-                        sv.str.startswith(status_f) if status_f != "To check" else
-                        sv.str.contains("CHECK|check", regex=True)]
-                    cols_ = [c_ for c_ in ["File", "Student ID", "Name", "Batch", "Score /100", "Submission", "Status",
-                                           "Notes"] if c_ in view_.columns]
-                    st.dataframe(view_[cols_], hide_index=True, use_container_width=True,
-                                 column_config={"Status": st.column_config.TextColumn(width="large")})
-                with st.expander(f"Files uploaded in this run ({len(up_df)})"):
-                    st.dataframe(up_df.drop(columns=["Run started (UTC)", "Type", "Case", "By"], errors="ignore"),
+                    "Open one run", [r["run_id"] for r in shown_runs], key="rh_pick",
+                    format_func=lambda rid: next(
+                        f"{r['started_at']} UTC · {r['kind']} · {r['case_id']} · "
+                        f"{per_run.loc[rid, 'Evaluated']} evaluated, {per_run.loc[rid, 'Skipped']} skipped, "
+                        f"{per_run.loc[rid, 'Failed']} failed" for r in shown_runs if r["run_id"] == rid))
+                one = rows_f[rows_f["run_id"] == pick_run]
+                status_f = st.radio("Show", ["Everything", "Skipped", "Failed", "To check"], horizontal=True,
+                                    key="rh_show")
+                sv = one["Status"].astype(str)
+                view_ = one if status_f == "Everything" else one[
+                    sv.str.startswith(status_f) if status_f != "To check" else sv.str.contains("CHECK|check",
+                                                                                               regex=True)]
+                cols_ = [c_ for c_ in ["File", "Student ID", "Name", "Batch", "Score /100", "Submission", "Status",
+                                       "Notes"] if c_ in view_.columns]
+                st.dataframe(view_[cols_], hide_index=True, use_container_width=True,
+                             column_config={"Status": st.column_config.TextColumn(width="large")})
+                up_one = [u for u in all_up if u["run_id"] == pick_run]
+                with st.expander(f"Files uploaded in this run ({len(up_one)})"):
+                    st.dataframe(pd.DataFrame(up_one)[["File", "Bytes"]] if up_one else pd.DataFrame(),
                                  hide_index=True, use_container_width=True)
                 st.download_button("Download this run (Excel)", run_workbook([pick_run]),
                                    file_name=f"Run_{pick_run}.xlsx", key="rh_one")
