@@ -49,16 +49,22 @@ def style_off_roster(df, flag_col="Roster"):
     return df.style.apply(row_style, axis=1)
 
 
-def callout_html(ids, what="student ID(s)", action="Add them under <b>Students &amp; batches</b> so they count in "
-                                                    "results and batch reports."):
-    """Branded call-out panel naming the off-roster IDs (shown with st.markdown(..., unsafe_allow_html=True))."""
-    shown = ", ".join(html.escape(i) for i in ids[:30]) + (" ..." if len(ids) > 30 else "")
+def panel_html(label, body):
+    """Simandhar call-out panel: light maroon, maroon left rule, bold maroon label, then body (HTML)."""
     return (f"<div style='background:{MAROON_LIGHT_HEX};border-left:4px solid {MAROON_HEX};padding:10px 14px;"
             f"border-radius:4px;margin:6px 0 10px 0;color:#2b2b2b'>"
-            f"<span style='color:{MAROON_HEX};font-weight:700;letter-spacing:.3px'>{NOT_ON_ROSTER}</span>"
-            f" &nbsp;·&nbsp; <b>{len(ids)}</b> {what} not on our roster: "
-            f"<span style='color:{MAROON_HEX};font-weight:700'>{shown}</span><br/>"
-            f"<span style='font-size:0.9em'>{action}</span></div>")
+            f"<span style='color:{MAROON_HEX};font-weight:700;letter-spacing:.3px'>{html.escape(label)}</span>"
+            f" &nbsp;·&nbsp; {body}</div>")
+
+
+def callout_html(ids, what="student ID(s)", action="Add them under <b>Students &amp; batches</b> so they count in "
+                                                    "results and batch reports.",
+                 label=NOT_ON_ROSTER, tail="not on our roster"):
+    """Branded call-out panel naming the IDs (shown with st.markdown(..., unsafe_allow_html=True))."""
+    shown = ", ".join(html.escape(str(i)) for i in ids[:30]) + (" ..." if len(ids) > 30 else "")
+    return panel_html(label, f"<b>{len(ids)}</b> {what} {tail}: "
+                             f"<span style='color:{MAROON_HEX};font-weight:700'>{shown}</span><br/>"
+                             f"<span style='font-size:0.9em'>{action}</span>")
 
 
 def highlight_excel_sheet(ws, flag_header="Roster"):

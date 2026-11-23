@@ -63,6 +63,9 @@ All of these are settings (`finalscore.DEFAULTS`, changed in the app with the ad
 - MCQ marks: Excel/CSV with *Student ID* and *Test 1..4* columns (or one *Marks* column plus the test number).
 - Views: *Progress so far* (marks earned out of 100, plus marks possible from what the batch has done; no
   result label) and *Final* (Pass, or At risk below 70).
+- *Attendance & Deloitte report* tab: upload the daily 80% attendance reports; a learner tracker brings classes,
+  mock returns (incl. improper submissions, shaded maroon), MCQ tests and marks together with flags; one branded
+  Excel report for Deloitte (summary, every learner, one sheet per concern, class-wise).
 - Students not on the roster are shaded maroon and tagged NOT ON ROSTER on every screen and Excel download.
 - *Submission status* lists, per case, improper submissions (could not be evaluated, no PDF, not matched,
   named wrongly) and students not received (did not attempt).

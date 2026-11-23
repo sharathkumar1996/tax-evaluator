@@ -181,8 +181,9 @@ with st.sidebar:
         st.download_button("Download blank answer-key template", tpl.read_bytes(), file_name="answer_key_template.xlsx")
 
 st.title("Tax Return Evaluator")
-t_eval, t_students, t_mgmt, t_batch, t_integ, t_find, t_build, t_data, t_help = st.tabs(
-    ["Evaluate returns", "Students & batches", "Management dashboard", "Batch reports", "Integrity checks",
+t_eval, t_students, t_att, t_mgmt, t_batch, t_integ, t_find, t_build, t_data, t_help = st.tabs(
+    ["Evaluate returns", "Students & batches", "Attendance & Deloitte report", "Management dashboard",
+     "Batch reports", "Integrity checks",
      "Find a report / history",
      "Build a key from a correct return", "Data management", "How it works"])
 
@@ -503,11 +504,14 @@ with t_students:
         st.info("Connect a database (see 'How it works') to keep a student roster with batches.")
     else:
         st.subheader("Student roster")
-        st.write("Upload an Excel or CSV file with the columns **Student ID**, **Student Name** and **Batch**. "
-                 "Uploading again adds new students and updates existing ones (e.g. to move a student to another batch).")
+        st.write("Upload an Excel or CSV file with the columns **Student ID**, **Student Name**, **Batch** and "
+                 "(recommended) **Email** - the learner's Deloitte email, used to match class attendance. "
+                 "Uploading again adds new students and updates existing ones (e.g. to move a student to another "
+                 "batch); a blank email keeps the one already saved.")
         tmpl = io.BytesIO()
         pd.DataFrame({"Student ID": ["S0001", "S0002"], "Student Name": ["Example Name", "Another Name"],
-                      "Batch": ["Batch-1", "Batch-1"]}).to_excel(tmpl, index=False)
+                      "Batch": ["Batch-1", "Batch-1"],
+                      "Email": ["example.ext@deloitte.com", "another.ext@deloitte.com"]}).to_excel(tmpl, index=False)
         st.download_button("Download roster template", tmpl.getvalue(), file_name="student_roster_template.xlsx")
         up = st.file_uploader("Roster file", type=["xlsx", "csv"], key="roster")
         if up is not None:
@@ -518,6 +522,8 @@ with t_students:
                 cid_ = cols.get("student id") or cols.get("studentid") or cols.get("id")
                 cnm = cols.get("student name") or cols.get("name")
                 cbt = cols.get("batch")
+                cem = next((cols[k_] for k_ in ("email", "email id", "deloitte email id", "deloitte email",
+                                                "mail id", "e-mail") if k_ in cols), None)
                 if not cid_:
                     st.error("No 'Student ID' column found.")
                 else:
@@ -525,10 +531,15 @@ with t_students:
                     for _, r in rdf.iterrows():
                         sid_ = str(r[cid_]).strip().upper()
                         if sid_ and sid_ != "NAN":
+                            em_ = str(r[cem]).strip().lower() if cem and pd.notna(r[cem]) else ""
                             recs.append((sid_, str(r[cnm]).strip() if cnm and pd.notna(r[cnm]) else "",
-                                         str(r[cbt]).strip() if cbt and pd.notna(r[cbt]) else "Unassigned"))
-                    st.write(f"{len(recs)} students found in the file.")
-                    st.dataframe(pd.DataFrame(recs[:20], columns=["Student ID", "Name", "Batch"]), hide_index=True)
+                                         str(r[cbt]).strip() if cbt and pd.notna(r[cbt]) else "Unassigned",
+                                         em_ if "@" in em_ else ""))
+                    st.write(f"{len(recs)} students found in the file"
+                             + (f", {sum(1 for x in recs if x[3])} with an email." if cem else
+                                ". No Email column - class attendance will be matched by name only."))
+                    st.dataframe(pd.DataFrame(recs[:20], columns=["Student ID", "Name", "Batch", "Email"]),
+                                 hide_index=True)
                     if st.button("Save roster", type="primary"):
                         db.upsert_students(recs)
                         st.success(f"Saved {len(recs)} students.")
@@ -540,8 +551,235 @@ with t_students:
             st.dataframe(studs.groupby("batch").size().rename("Students").reset_index().rename(columns={"batch": "Batch"}),
                          hide_index=True)
             with st.expander(f"All students ({len(studs)})"):
-                st.dataframe(studs.rename(columns={"student_id": "Student ID", "name": "Name", "batch": "Batch"}),
+                st.dataframe(studs.rename(columns={"student_id": "Student ID", "name": "Name", "batch": "Batch",
+                                                   "email": "Email"}), hide_index=True)
+
+# ------------------------------------------------------------------ attendance & the Deloitte report
+with t_att:
+    if not db:
+        st.info("Attendance needs the database (it keeps every class date).")
+    else:
+        import json
+
+        from attendance import (ABSENT, BELOW, FLAG_ALL, FLAG_IMPROPER, FLAG_LOW_ATT, FLAG_LOW_PERF, FLAG_MCQ,
+                                FLAG_MOCK, FLAGS, PRESENT, AttendanceError, alias_key, batch_overview,
+                                class_summary, deloitte_workbook, flag_list, match_rows, read_report,
+                                session_records, tracker)
+        from batchreport import improper_submissions, prepare
+        from roster_flag import ROW_CSS, panel_html
+
+        acfg = load_settings(db.settings())
+        a_set = db.settings()
+        try:
+            aliases = json.loads(a_set.get("attendance_aliases") or "{}")
+        except ValueError:
+            aliases = {}
+        min_att = float(a_set.get("att_min_pct") or 80)
+        low_perf = float(a_set.get("low_perf_pct") or acfg["pass_mark"])
+        roster_all = db.students()
+        st.subheader("Attendance & the report for Deloitte")
+        st.caption("Classes, mock returns and MCQ tests for every learner in one place - who is not attending, who "
+                   "has not submitted, whose submission was not accepted, who missed MCQs and who is not "
+                   "performing well.")
+        if not roster_all:
+            st.info("Add the student roster under **Students & batches** first (with the Email column, so class "
+                    "attendance can be matched).")
+        a_up, a_tr, a_cl, a_rep = st.tabs(["Upload class attendance", "Learner tracker", "Class-wise",
+                                           "Report for Deloitte"])
+
+        # ---------------------------------------------------------- upload
+        with a_up:
+            st.write("Upload the daily attendance report Rajashekhar sends Deloitte "
+                     "(**Deloitte-Form1040-Attendance-80pct-&lt;date&gt;.xlsx**) - one or more days at once. The "
+                     "class date is read from the file. Learners at 80% or more of the session are **Present**, "
+                     "those who left early are **Below 80%** (not counted as attended), and roster learners who "
+                     "are not in the report are **Absent**. Uploading a date again replaces it.")
+            n_mail = sum(1 for x in roster_all if x.get("email"))
+            if roster_all and n_mail < len(roster_all):
+                st.markdown(panel_html("NO EMAIL ON ROSTER",
+                                       f"<b>{len(roster_all) - n_mail} of {len(roster_all)}</b> roster learners have "
+                                       "no Deloitte email, so they are matched by name only. Add the <b>Email</b> "
+                                       "column to the roster under Students &amp; batches for exact matching."),
+                            unsafe_allow_html=True)
+            files = st.file_uploader("Attendance reports", type=["xlsx", "csv"], accept_multiple_files=True,
+                                     key=f"att_files{ss.get('att_n', 0)}")
+            done_dates = {r["session_date"]: r for r in db.attendance_dates()}
+            id_opts = [""] + [f"{x['student_id']} - {x['name'] or ''} ({x['batch'] or ''})" for x in roster_all]
+            for f in files or []:
+                with st.expander(f"{f.name}", expanded=True):
+                    try:
+                        d0, rows = read_report(f.getvalue(), f.name)
+                    except AttendanceError as e:
+                        st.error(str(e))
+                        continue
+                    except Exception:
+                        log.exception("reading attendance failed")
+                        st.error("This file could not be read. Check it is the daily attendance report.")
+                        continue
+                    d = st.date_input("Class date", value=d0, key=f"att_d_{f.name}")
+                    ds = d.isoformat()
+                    matched = match_rows(rows, roster_all, aliases)
+                    recs, unmatched = session_records(ds, matched, roster_all)
+                    cnt = pd.Series([r["status"] for r in recs]).value_counts()
+                    k = st.columns(5)
+                    k[0].metric("In the report", len(rows))
+                    k[1].metric(PRESENT, int(cnt.get(PRESENT, 0)))
+                    k[2].metric(BELOW, int(cnt.get(BELOW, 0)))
+                    k[3].metric(ABSENT, int(cnt.get(ABSENT, 0)), help="Roster learners of the batches in this "
+                                                                     "report who are not in it")
+                    k[4].metric("Not matched", len(unmatched))
+                    by_how = pd.Series([r["matched_by"] for r in recs if r["status"] != ABSENT]).value_counts()
+                    st.caption("Matched by " + ", ".join(f"{h}: {n}" for h, n in by_how.items()) if len(by_how)
+                               else "Nobody matched yet.")
+                    if ds in done_dates:
+                        st.warning(f"Attendance for {d:%d %b %Y} is already saved - saving replaces it for the "
+                                   "batches in this file.")
+                    links = {}
+                    if unmatched:
+                        st.markdown(f"**{len(unmatched)} people in the report could not be matched to the roster.** "
+                                    "Link them below if they are learners (the link is remembered for later "
+                                    "days); leave blank if not. If they are not learners at all, leave them.")
+                        um = pd.DataFrame([{"Batch": r["batch"], "Name in report": r["name"], "Email": r["email"],
+                                            "Status": r["status"], "Link to roster learner": ""} for r in unmatched])
+                        ed = st.data_editor(um, hide_index=True, use_container_width=True, key=f"att_um_{f.name}",
+                                            disabled=["Batch", "Name in report", "Email", "Status"],
+                                            column_config={"Link to roster learner": st.column_config.SelectboxColumn(
+                                                options=id_opts, width="large")})
+                        for (_, e_), r in zip(ed.iterrows(), unmatched):
+                            if e_["Link to roster learner"]:
+                                links[alias_key(r)] = e_["Link to roster learner"].split(" - ")[0]
+                    if st.button(f"Save attendance for {d:%d %b %Y}", type="primary", key=f"att_save_{f.name}"):
+                        if links:
+                            aliases.update(links)
+                            db.save_settings({"attendance_aliases": json.dumps(aliases)})
+                            matched = match_rows(rows, roster_all, aliases)
+                            recs, unmatched = session_records(ds, matched, roster_all)
+                        n = db.save_attendance(ds, recs, staff or "")
+                        st.success(f"Saved {n} attendance records for {d:%d %b %Y}"
+                                   + (f" ({len(links)} learner(s) linked by hand)." if links else "."))
+            saved = db.attendance_dates()
+            st.markdown("##### Class dates saved")
+            if not saved:
+                st.write("None yet.")
+            else:
+                st.dataframe(pd.DataFrame(saved).rename(columns={"session_date": "Date", "n": "Records",
+                                                                 "uploaded_at": "Uploaded", "uploaded_by": "By"}),
                              hide_index=True)
+                with st.expander("Remove a class date"):
+                    rm = st.selectbox("Date", [r["session_date"] for r in saved], key="att_rm")
+                    if st.checkbox(f"Yes, remove all attendance for {rm}", key="att_rm_ok") and \
+                            st.button("Remove", key="att_rm_btn"):
+                        db.erase_attendance(rm)
+                        st.success(f"Attendance for {rm} removed.")
+                        st.rerun()
+
+        # ---------------------------------------------------------- shared data for the other tabs
+        fc_a = db.final_cases()
+        all_evs_a = db.evaluations()
+        studs_a, evs_a = prepare(roster_all, all_evs_a, fc_a)
+        try:
+            runs_a = db.run_rows(fc_a)
+        except Exception:
+            log.exception("reading the evaluation runs failed")
+            runs_a = []
+        imp_a = improper_submissions(studs_a, evs_a, runs_a, case_ids=fc_a, all_evaluations=all_evs_a)
+        mcq_a = db.mcq_scores()
+        att_a = db.attendance()
+        scores_a = final_scores(studs_a, evs_a, mcq_a, fc_a, acfg, view=SO_FAR)
+        track = tracker(studs_a, att_a, evs_a, mcq_a, fc_a, imp_a, scores_a, acfg, min_att=min_att,
+                        low_perf=low_perf)
+
+        def style_track(df):
+            if df.empty or "Flags" not in df:
+                return df
+            return df.style.apply(lambda r: [ROW_CSS if FLAG_IMPROPER in str(r.get("Flags")) else ""] * len(r),
+                                  axis=1)
+
+        # ---------------------------------------------------------- tracker
+        with a_tr:
+            if track.empty:
+                st.info("No learners yet.")
+            else:
+                f1, f2, f3 = st.columns([1, 2, 1])
+                bsel_a = f1.multiselect("Batches", sorted(track["Batch"].unique()),
+                                        default=sorted(track["Batch"].unique()), key="att_b")
+                fsel = f2.multiselect("Show learners flagged for", FLAGS, key="att_f",
+                                      help="Empty = everyone. Several = learners with any of them.")
+                q_a = f3.text_input("Search name or ID", key="att_q")
+                v = track[track["Batch"].isin(bsel_a)]
+                if fsel:
+                    v = v[v["Flags"].apply(lambda x: any(f_ in x for f_ in fsel))]
+                if q_a.strip():
+                    v = v[v["Name"].str.contains(q_a, case=False, na=False) |
+                          v["Student ID"].str.contains(q_a, case=False, na=False)]
+                ov = batch_overview(track[track["Batch"].isin(bsel_a)])
+                tot = ov.set_index("Batch").loc["All batches"] if not ov.empty else {}
+                k = st.columns(7)
+                k[0].metric("Learners", int(tot.get("Learners", 0)))
+                k[1].metric("Avg attendance", "-" if pd.isna(tot.get("Average attendance %")) else
+                            f"{tot.get('Average attendance %'):g}%")
+                for i_, f_ in enumerate([FLAG_LOW_ATT, FLAG_MOCK, FLAG_IMPROPER, FLAG_MCQ, FLAG_LOW_PERF], 2):
+                    k[i_].metric(f_, int(tot.get(f_, 0)))
+                if int(tot.get(FLAG_ALL, 0)):
+                    st.markdown(callout_html(flag_list(track[track["Batch"].isin(bsel_a)], FLAG_ALL)["Student ID"]
+                                             .tolist(), "learner(s) attended no class, submitted no mock return "
+                                             "and took no MCQ test", "Listed on the 'Absent for everything' sheet "
+                                             "of the Deloitte report.", label="ABSENT FOR EVERYTHING", tail=""),
+                                unsafe_allow_html=True)
+                st.caption(f"Rows shaded maroon: a mock return was submitted but not accepted (improper "
+                           f"submission). Low class attendance = below {min_att:g}% of classes at 80%+ of the "
+                           f"session. Not performing well = below {low_perf:g}% of the marks possible so far. "
+                           "Change these under 'Report for Deloitte'.")
+                show_cols = ["Student ID", "Name", "Batch", "Flags", "Classes held", "Present (80%+)", "Below 80%",
+                             "Absent", "Attendance %", "Mocks due", "Mocks evaluated", "Improper submissions",
+                             "Mocks not received", "MCQ tests held", "MCQ tests taken", "Marks so far",
+                             "% of possible so far", "Not received", "Improper details", "MCQ missed"] + \
+                            [c for c in v.columns if c.startswith("Class ")]
+                st.dataframe(style_track(v.sort_values(["Flag count", "Attendance %"], ascending=[False, True])
+                                         [show_cols]),
+                             hide_index=True, use_container_width=True,
+                             column_config={"Attendance %": st.column_config.ProgressColumn(
+                                 format="%.0f%%", min_value=0, max_value=100),
+                                 "Flags": st.column_config.TextColumn(width="large")})
+                st.caption(f"{len(v)} learner(s) shown.")
+
+        # ---------------------------------------------------------- class-wise
+        with a_cl:
+            cs_df = class_summary(att_a, studs_a)
+            if cs_df.empty:
+                st.info("No class attendance saved yet.")
+            else:
+                st.dataframe(cs_df, hide_index=True, use_container_width=True,
+                             column_config={"Attendance %": st.column_config.ProgressColumn(
+                                 format="%.1f%%", min_value=0, max_value=100)})
+                try:
+                    st.line_chart(cs_df.pivot(index="Date", columns="Batch", values="Attendance %"), height=260)
+                except Exception:
+                    log.exception("attendance chart failed")
+
+        # ---------------------------------------------------------- report for Deloitte
+        with a_rep:
+            st.write("One Simandhar-branded Excel workbook for Deloitte: a summary per batch, every learner, and "
+                     "one sheet each for learners not attending classes, mock returns not submitted, **submissions "
+                     "not accepted (improper)**, MCQ tests missed, learners not performing well, and learners "
+                     "absent for everything - plus class-wise attendance. Learners with an improper submission are "
+                     "shaded maroon on every sheet.")
+            r1, r2 = st.columns(2)
+            new_min = r1.number_input("Minimum class attendance (% of classes attended at 80%+)", 0.0, 100.0,
+                                      min_att, 5.0, key="att_min")
+            new_low = r2.number_input("Not performing well below (% of marks possible so far)", 0.0, 100.0,
+                                      low_perf, 5.0, key="att_low")
+            if (new_min, new_low) != (min_att, low_perf) and st.button("Save these limits"):
+                db.save_settings({"att_min_pct": str(new_min), "low_perf_pct": str(new_low)})
+                st.rerun()
+            ov_all = batch_overview(track)
+            if not ov_all.empty:
+                st.dataframe(ov_all, hide_index=True, use_container_width=True)
+            st.download_button("Download the report for Deloitte (Excel)",
+                               deloitte_workbook(track, class_summary(att_a, studs_a), institute,
+                                                 min_att=min_att, low_perf=low_perf),
+                               file_name=f"Deloitte_Form1040_Learner_Report_{datetime.now():%Y%m%d}.xlsx",
+                               type="primary", disabled=track.empty)
 
 # ------------------------------------------------------------------ management
 with t_mgmt:
@@ -1526,6 +1764,18 @@ each case, and gives every student a Simandhar-branded evaluation report with a 
   evaluated, no PDF, not matched to a student, named wrongly) and the students **not received** (did not attempt). Download the results in Excel and a
   Simandhar-branded scorecard PDF for each student.
 - Under *Scoring settings*, tick only the cases that are the course's mock returns, so practice cases don't count.
+
+### Attendance & the report for Deloitte
+- **Upload class attendance**: the daily report Rajashekhar sends Deloitte (*Deloitte-Form1040-Attendance-80pct-
+  &lt;date&gt;.xlsx*), one or more days at once. 80%+ of the session = **Present**; joined but left early = **Below 80%**
+  (not counted as attended); on the roster but not in the report = **Absent**. Learners are matched by Deloitte email
+  (add an *Email* column to the roster), then by name; anyone not matched can be linked by hand once and is
+  remembered.
+- **Learner tracker**: one row per learner - classes, mock returns, MCQ tests, marks so far - with flags: *Low class
+  attendance*, *Missed mock returns*, *Improper submission* (submitted but not accepted - shaded maroon),
+  *Missed MCQ tests*, *Not performing well* and *Absent for everything*. Filter by batch and flag.
+- **Report for Deloitte**: a Simandhar-branded Excel with a summary per batch, every learner, one sheet per concern
+  and class-wise attendance. The attendance and performance limits can be changed there.
 
 ### Batch reports (for the trainers)
 - **Filters** at the top (batches, mock returns) apply to everything on the page and to the reports.

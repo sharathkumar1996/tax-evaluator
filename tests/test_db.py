@@ -156,3 +156,19 @@ def test_run_history_is_kept_listed_and_scrubbed(db):
     assert [r["run_id"] for r in db.runs()] == ["r1"]
     db.erase_all()
     assert db.runs() == []
+
+
+def test_roster_email_and_class_attendance(db):
+    db.upsert_students([("S1", "Asha", "Batch-1", "asha.ext@deloitte.com"), ("S2", "Ben", "Batch-2")])
+    db.upsert_students([("S1", "Asha K", "Batch-1", "")])                 # a blank email keeps the saved one
+    assert {s["student_id"]: s["email"] for s in db.students()} == {"S1": "asha.ext@deloitte.com", "S2": None}
+    rec = lambda sid, b, st: {"student_id": sid, "batch": b, "status": st, "pct": None, "matched_by": "email",
+                              "source_name": "", "source_email": ""}
+    db.save_attendance("2026-11-18", [rec("S1", "Batch-1", "Present"), rec("S2", "Batch-2", "Absent")], "me")
+    db.save_attendance("2026-11-18", [rec("S1", "Batch-1", "Below 80%")], "me")   # replaces batch 1 only
+    assert {(a["student_id"], a["status"]) for a in db.attendance()} == {("S1", "Below 80%"), ("S2", "Absent")}
+    assert db.attendance_dates()[0]["n"] == 2
+    db.erase_student("S2")
+    assert [a["student_id"] for a in db.attendance()] == ["S1"]
+    db.erase_attendance("2026-11-18")
+    assert db.attendance() == []

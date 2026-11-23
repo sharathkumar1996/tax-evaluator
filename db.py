@@ -142,6 +142,21 @@ MIGRATIONS = [
             warnings INTEGER,
             detail TEXT)""",
          "CREATE INDEX IF NOT EXISTS ix_runs_case ON eval_runs (case_id, started_at)"]),
+    # class attendance (one row per learner per class date) and the learner's Deloitte email for matching
+    (6, [("add_column", "students", "email", "TEXT"),
+         """CREATE TABLE IF NOT EXISTS attendance (
+            session_date TEXT NOT NULL,
+            student_id TEXT NOT NULL,
+            batch TEXT,
+            status TEXT,
+            pct REAL,
+            matched_by TEXT,
+            source_name TEXT,
+            source_email TEXT,
+            uploaded_at TEXT,
+            uploaded_by TEXT,
+            PRIMARY KEY (session_date, student_id))""",
+         "CREATE INDEX IF NOT EXISTS ix_att_student ON attendance (student_id)"]),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 TRANSIENT = ("OperationalError", "InterfaceError", "PoolTimeout", "ConnectionTimeout")
@@ -317,17 +332,55 @@ class DB:
 
     # ------------------------------------------------------------ students
     def upsert_students(self, recs):
-        """recs: list of (student_id, name, batch)."""
+        """recs: list of (student_id, name, batch) or (student_id, name, batch, email). A blank email keeps the
+        one already saved."""
         t = now()
-        self.many("""INSERT INTO students (student_id, name, batch, updated_at) VALUES (?, ?, ?, ?)
+        rows = [(r[0], r[1], r[2], (r[3] if len(r) > 3 else "") or None, t) for r in recs]
+        self.many("""INSERT INTO students (student_id, name, batch, email, updated_at) VALUES (?, ?, ?, ?, ?)
                      ON CONFLICT (student_id) DO UPDATE SET name = excluded.name, batch = excluded.batch,
-                     updated_at = excluded.updated_at""", [(s, n, b, t) for s, n, b in recs])
+                     email = COALESCE(excluded.email, students.email),
+                     updated_at = excluded.updated_at""", rows)
 
     def students(self):
-        return self.rows("SELECT student_id, name, batch FROM students ORDER BY batch, student_id")
+        return self.rows("SELECT student_id, name, batch, email FROM students ORDER BY batch, student_id")
+
+    # ------------------------------------------------------------------ class attendance
+    def save_attendance(self, session_date, recs, by):
+        """Replace the attendance of one class date with recs (attendance.session_records output) for the
+        batches in recs; other batches' records for that date are kept."""
+        batches = sorted({r["batch"] for r in recs})
+        t = now()
+
+        def f(c):
+            for b in batches:
+                c.execute("DELETE FROM attendance WHERE session_date = ? AND batch = ?", (session_date, b))
+            for r in recs:
+                c.execute("""INSERT INTO attendance (session_date, student_id, batch, status, pct, matched_by,
+                             source_name, source_email, uploaded_at, uploaded_by)
+                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             ON CONFLICT (session_date, student_id) DO UPDATE SET batch = excluded.batch,
+                             status = excluded.status, pct = excluded.pct, matched_by = excluded.matched_by,
+                             source_name = excluded.source_name, source_email = excluded.source_email,
+                             uploaded_at = excluded.uploaded_at, uploaded_by = excluded.uploaded_by""",
+                          (session_date, r["student_id"], r["batch"], r["status"], r.get("pct"),
+                           r.get("matched_by"), r.get("source_name"), r.get("source_email"), t, by))
+            return len(recs)
+        return self.tx(f)
+
+    def attendance(self):
+        return self.rows("SELECT session_date, student_id, batch, status, pct, matched_by, source_name, "
+                         "source_email FROM attendance ORDER BY session_date, student_id")
+
+    def attendance_dates(self):
+        return self.rows("SELECT session_date, COUNT(*) AS n, MAX(uploaded_at) AS uploaded_at, "
+                         "MAX(uploaded_by) AS uploaded_by FROM attendance GROUP BY session_date "
+                         "ORDER BY session_date")
+
+    def erase_attendance(self, session_date):
+        self.run("DELETE FROM attendance WHERE session_date = ?", (session_date,))
 
     def student(self, sid):
-        r = self.rows("SELECT student_id, name, batch FROM students WHERE student_id = ?", (sid,))
+        r = self.rows("SELECT student_id, name, batch, email FROM students WHERE student_id = ?", (sid,))
         return r[0] if r else None
 
     # ------------------------------------------------------------ cases
@@ -643,6 +696,7 @@ class DB:
             c.execute("DELETE FROM fingerprints WHERE student_id = ?", (sid,))
             c.execute("DELETE FROM submission_log WHERE student_id = ?", (sid,))
             c.execute("DELETE FROM mcq_scores WHERE student_id = ?", (sid,))
+            c.execute("DELETE FROM attendance WHERE student_id = ?", (sid,))
             c.execute("DELETE FROM evaluations WHERE student_id = ?", (sid,))
             c.execute("DELETE FROM students WHERE student_id = ?", (sid,))
             self._scrub_runs(c, [sid])
@@ -658,6 +712,7 @@ class DB:
             c.execute(f"DELETE FROM fingerprints WHERE student_id IN ({sub})", (batch,))
             c.execute(f"DELETE FROM submission_log WHERE student_id IN ({sub})", (batch,))
             c.execute(f"DELETE FROM mcq_scores WHERE student_id IN ({sub})", (batch,))
+            c.execute(f"DELETE FROM attendance WHERE student_id IN ({sub})", (batch,))
             c.execute(f"DELETE FROM evaluations WHERE student_id IN ({sub})", (batch,))
             if roster_too:
                 c.execute("DELETE FROM students WHERE batch = ?", (batch,))
@@ -677,8 +732,8 @@ class DB:
 
     def erase_all(self):
         def f(c):
-            for t in ("mistakes", "fingerprints", "submission_log", "mcq_scores", "evaluations", "students", "cases",
-                      "eval_runs"):
+            for t in ("mistakes", "fingerprints", "submission_log", "mcq_scores", "attendance", "evaluations",
+                      "students", "cases", "eval_runs"):
                 c.execute(f"DELETE FROM {t}")
         self.tx(f)
 
