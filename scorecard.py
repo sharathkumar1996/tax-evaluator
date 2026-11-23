@@ -65,8 +65,8 @@ def scorecard_pdf(row, returns, settings, institute, view=FINAL):
                               ("BOX", (0, 0), (-1, -1), 0.5, LINE), ("INNERGRID", (0, 0), (-1, -1), 0.4, LINE)]))
     story += [info, Spacer(1, 10)]
 
-    total, result = row["Total / 100"], row["Result"]
-    good = result in ("Pass", "On track")
+    total, result = row["Total / 100"], row.get("Result") or ""
+    good = result == "Pass"
     big = ParagraphStyle("big", parent=BODY, fontName=FONT_BOLD, fontSize=26, leading=30, textColor=MAROON)
     res = ParagraphStyle("res", parent=BODY, fontName=FONT_BOLD, fontSize=15, leading=18,
                          textColor=GREEN if good else RED)
@@ -74,7 +74,7 @@ def scorecard_pdf(row, returns, settings, institute, view=FINAL):
                    _p(f"Pass mark: {s['pass_mark']:g} / 100" + ("" if final else
                       f". Progress so far: {_num(row.get('Marks possible so far'))} marks were possible from the "
                       f"returns and tests your batch has done; you earned {_num(row.get('% of possible so far'))}% "
-                      f"of them (on track = {s['pass_mark']:g}% or more)."), SMALL)]],
+                      f"of them."), SMALL)]],
                  colWidths=[50 * mm, 35 * mm, W - 85 * mm])
     head.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), MAROON_LIGHT), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
                               ("LEFTPADDING", (0, 0), (-1, -1), 8), ("TOPPADDING", (0, 0), (-1, -1), 8),

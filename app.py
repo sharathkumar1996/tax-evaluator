@@ -564,8 +564,8 @@ with t_mgmt:
             view = r1.radio("View", ["Progress so far", "Final (course complete)"], key="fs_view",
                             help="Both views show the marks earned so far out of 100. Progress so far also "
                                  "shows the marks that were possible from the returns and tests the batch has done; "
-                                 "On track = at least the pass mark % of those. Final: Pass / Fail on the marks "
-                                 "out of 100.")
+                                 "no Pass / At risk result. Final: Pass, or At risk if the marks out of 100 are "
+                                 "below the pass mark.")
             view = SO_FAR if view.startswith("Progress") else FINAL
             batches = sorted({x["batch"] or "" for x in all_students})
             pick_b = r2.multiselect("Batches", batches, default=batches, key="fs_batches")
@@ -575,13 +575,17 @@ with t_mgmt:
             else:
                 evs = [e for e in db.evaluations() if e["case_id"] in fcases]
                 df = final_scores(studs, evs, db.mcq_scores(), fcases, cfg, view=view)
-                good = "Pass" if view == FINAL else "On track"
-                n_good = int((df["Result"] == good).sum())
                 c = st.columns(3)
                 c[0].metric("Students", len(df))
-                c[1].metric(good, n_good)
-                c[2].metric("Fail" if view == FINAL else "At risk",
-                            int((df["Result"] == ("Fail" if view == FINAL else "At risk")).sum()))
+                if view == FINAL:
+                    c[1].metric("Pass", int((df["Result"] == "Pass").sum()))
+                    c[2].metric("At risk", int((df["Result"] == "At risk").sum()),
+                                help=f"Marks out of 100 below the pass mark of {cfg['pass_mark']:g}")
+                else:
+                    c[1].metric("Average marks so far", f"{df['Total / 100'].mean():.2f}")
+                    c[2].metric("Average % of possible so far",
+                                "-" if df["% of possible so far"].isna().all() else
+                                f"{df['% of possible so far'].mean():.1f}%")
                 if int(df["Status not set"].sum()):
                     st.warning(f"{int(df['Status not set'].sum())} evaluated return(s) have no on-time status yet "
                                "(evaluated before this feature) and earn no on-time marks. Set them under "
@@ -870,9 +874,7 @@ with t_batch:
                                      "so far")
                     k[2].metric("On-time rate", pc(all_row["On-time rate %"]))
                     k[3].metric("Average score", pc(all_row["Average score %"]))
-                    k[4].metric("At risk", int(all_row["At risk"]),
-                                help=f"Marks earned are below {bcfg['pass_mark']:g}% of the marks possible from "
-                                     "the returns and tests the batch has done so far")
+                    k[4].metric("MCQ average", pc(all_row["MCQ average %"]))
                     k[5].metric("Integrity flags", int(all_row["Integrity flags"]),
                                 help="Students rated likely or very likely copied")
                     st.markdown("##### Batch comparison")
@@ -934,22 +936,19 @@ with t_batch:
                     k[1].metric("Submission rate", pc(row["Submission rate %"]), delta("Submission rate %"))
                     k[2].metric("On-time rate", pc(row["On-time rate %"]), delta("On-time rate %"))
                     k[3].metric("Average score", pc(row["Average score %"]), delta("Average score %"))
-                    k[4].metric("On track / At risk", f"{int(row['On track'])} / {int(row['At risk'])}")
+                    k[4].metric("MCQ average", pc(row["MCQ average %"]), delta("MCQ average %"))
                     k[5].metric("Integrity flags", int(row["Integrity flags"]))
                     s1, s2, s3, s4, s5 = st.tabs(["Students", "Mock returns", "Not received / improper",
                                                   "Common mistakes", "Integrity"])
                     with s1:
-                        g1, g2 = st.columns([1, 2])
-                        res_pick = g1.multiselect("Show", ["At risk", "On track", "Not started"],
-                                                  default=["At risk", "On track", "Not started"], key="bi_res")
-                        q = g2.text_input("Search name or ID", key="bi_q")
-                        view_df = scores[scores["Result"].isin(res_pick)]
+                        q = st.text_input("Search name or ID", key="bi_q")
+                        view_df = scores
                         if q.strip():
                             view_df = view_df[view_df["Name"].str.contains(q, case=False, na=False) |
                                               view_df["Student ID"].str.contains(q, case=False, na=False)]
                         st.caption(f"Total / 100 = marks earned so far (each mock return is worth "
                                    f"{per_item(bcfg)[0]:.2f} accuracy + {per_item(bcfg)[1]:.2f} on-time marks). "
-                                   f"On track = at least {bcfg['pass_mark']:g}% of the marks possible so far.")
+                                   "Pass / At risk is shown under Management dashboard > Final results (Final view).")
                         st.dataframe(view_df.sort_values(["% of possible so far", "Total / 100"]), hide_index=True,
                                      use_container_width=True,
                                      column_config={"Total / 100": st.column_config.ProgressColumn(
@@ -1493,8 +1492,8 @@ each case, and gives every student a Simandhar-branded evaluation report with a 
   every change records who made it, why and when.
 - **MCQ marks**: upload an Excel/CSV with *Student ID* and *Test 1* ... *Test 4* columns under *MCQ test marks*.
 - **Final results**: marks add up return by return, out of 100, in both views. *Progress so far* also shows the
-  marks possible from what the batch has done so far: **On track** = at least the pass mark % of those, else
-  **At risk**. *Final* gives Pass / Fail on the total.
+  marks possible from what the batch has done so far (no Pass / At risk there). *Final* gives **Pass**, or
+  **At risk** when the total is below the pass mark.
 - **Submission status** lists, for each case, the evaluated returns, the **improper submissions** (could not be
   evaluated, no PDF, not matched to a student, named wrongly) and the students **not received** (did not attempt). Download the results in Excel and a
   Simandhar-branded scorecard PDF for each student.

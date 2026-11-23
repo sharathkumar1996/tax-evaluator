@@ -134,7 +134,6 @@ def batch_report_pdf(batch, trainer, summary, students, mocks, missing, mistakes
                           if s["Status not set"] else ""),
                          ("Average return score", pct(s["Average score %"]), f"median {pct(s['Median score %'])}"),
                          ("MCQ average", pct(s["MCQ average %"]), ""),
-                         ("On track / At risk", f"{s['On track']} / {s['At risk']}", f"pass mark {cfg['pass_mark']:g}"),
                          ("Integrity flags", str(s["Integrity flags"]) if integrity_ran else "-",
                           "likely or very likely copied" if integrity_ran else "not run")], W))
     story.append(Spacer(1, 6))
@@ -151,14 +150,13 @@ def batch_report_pdf(batch, trainer, summary, students, mocks, missing, mistakes
     story.append(Paragraph(f"Marks out of 100 earned so far. Each mock return is worth {pa:.2f} accuracy marks (in "
                            f"proportion to its score) and {po:.2f} on-time marks; each MCQ test "
                            f"{cfg['w_mcq'] / cfg['n_mcq'] if cfg['n_mcq'] else 0:.2f} marks. 'Possible' = the marks "
-                           f"the returns and tests done so far were worth; On track = at least {cfg['pass_mark']:g}% "
-                           "of them. Lowest first, so the students who need help are at the top.", SMALL))
+                           f"the returns and tests done so far were worth. Lowest first, so the students who need help are at the top.", SMALL))
     st_cols = ["Student ID", "Name", "Returns evaluated", "Average return score", "On time", "Late",
-               "Total / 100", "Marks possible so far", "% of possible so far", "Result"]
+               "Total / 100", "Marks possible so far", "% of possible so far"]
     stab = students[st_cols].sort_values(["% of possible so far", "Total / 100"]).rename(
         columns={"Returns evaluated": "Returns", "Average return score": "Avg return %", "Total / 100": "Marks",
                  "Marks possible so far": "Possible", "% of possible so far": "% of possible"})
-    story.append(_table(stab, [14, 30, 10, 11, 8, 7, 9, 9, 10, 12], W, status_col="Result"))
+    story.append(_table(stab, [14, 30, 10, 11, 8, 7, 10, 10, 11], W))
 
     story.append(CondPageBreak(50 * mm))
     story.append(Paragraph("Returns not received", H2))

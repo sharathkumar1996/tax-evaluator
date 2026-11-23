@@ -61,8 +61,8 @@ All of these are settings (`finalscore.DEFAULTS`, changed in the app with the ad
 - On-time status is chosen when evaluating (single, or per batch with exceptions), kept on re-evaluation, and
   editable later by staff and admin with a change history (`submission_log`).
 - MCQ marks: Excel/CSV with *Student ID* and *Test 1..4* columns (or one *Marks* column plus the test number).
-- Views: *Progress so far* (marks earned out of 100, plus marks possible from what the batch has done;
-  "On track" = at least 70% of those, else "At risk") and *Final* (Pass / Fail).
+- Views: *Progress so far* (marks earned out of 100, plus marks possible from what the batch has done; no
+  result label) and *Final* (Pass, or At risk below 70).
 - *Submission status* lists, per case, improper submissions (could not be evaluated, no PDF, not matched,
   named wrongly) and students not received (did not attempt).
 - Downloads: results workbook (results, scoring settings, status changes) and a branded scorecard PDF per student

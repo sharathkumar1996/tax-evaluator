@@ -5,7 +5,7 @@ Everything is worked out from what the database holds (roster, evaluations of th
 their mistakes, MCQ marks and the integrity analysis). A batch is measured only on the mock returns it has
 done so far: a mock counts as "done" by a batch once any of its students has been evaluated on it.
 
-  batch_summary   one row per batch (+ all batches): submission and on-time rates, scores, on track / at risk,
+  batch_summary   one row per batch (+ all batches): submission and on-time rates, scores,
                   MCQ average, integrity flags
   mock_table      per mock: returns received, on time, average / median / lowest / highest score
   top_mistakes    the lines most often wrong, with how many students got them wrong
@@ -82,8 +82,6 @@ def batch_summary(studs, evs, mcq, final_cases, cfg, integrity_students=None, tr
             "Median score %": round(median(pcts), 1) if pcts else None,
             "MCQ average %": round(100 * sum(float(m["marks"] or 0) for m in tests) /
                                    (len(tests) * cfg["mcq_out_of"]), 1) if tests else None,
-            "On track": int((sc["Result"] == "On track").sum()),
-            "At risk": int((sc["Result"] == "At risk").sum()),
             "Integrity flags": flagged[b] if b != ALL else sum(flagged.values()),
             "Status not set": sum(1 for e in be if e.get("on_time") is None),
         })
@@ -232,7 +230,8 @@ def score_bands(scores_df):
     """How many students fall in each band of their share of the marks possible so far (%)."""
     bands = [("Below 50", 0, 50), ("50-59", 50, 60), ("60-69", 60, 70), ("70-79", 70, 80), ("80-89", 80, 90),
              ("90-100", 90, 100.01)]
-    started = scores_df[scores_df["Result"] != "Not started"]
+    started = scores_df[scores_df["Marks possible so far"].fillna(0) > 0] if "Marks possible so far" in scores_df \
+        else scores_df
     t = started["% of possible so far"] if "% of possible so far" in started else started["Total / 100"]
     return pd.DataFrame([{"Score band": n, "Students": int(((t >= lo) & (t < hi)).sum())} for n, lo, hi in bands])
 

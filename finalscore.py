@@ -13,10 +13,9 @@ as the course goes on (nothing is averaged over "what's done so far" or scaled u
   Pass mark        70
 
 Two views; the marks are the same in both:
-  * "final"   - the whole course; Pass / Fail against the pass mark.
+  * "final"   - the whole course; Result = Pass (total at or above the pass mark) or At risk (below it).
   * "so far"  - also shows the marks that were possible from the returns and tests the student's batch has
-                done so far, and the student's share of them. "On track" = that share is at least the pass mark
-                (e.g. 70% of the marks possible so far), "At risk" = below it.
+                done so far, and the student's share of them. No Pass / At risk result in this view.
 The numbers (12 returns, 60/20/20, 4 tests of 50, pass 70) are settings, changeable in the app.
 """
 import re
@@ -29,6 +28,7 @@ LABELS = {"n_mocks": "Mock returns in the course", "w_accuracy": "Marks for retu
           "w_on_time": "Marks for on-time submission", "w_mcq": "Marks for MCQ tests", "n_mcq": "Number of MCQ tests",
           "mcq_out_of": "Marks per MCQ test", "pass_mark": "Pass mark (out of 100)"}
 FINAL, SO_FAR = "final", "so far"
+PASS, AT_RISK = "Pass", "At risk"
 
 
 def load_settings(stored):
@@ -124,14 +124,12 @@ def final_scores(students, evaluations, mcq, final_cases, settings, view=FINAL):
                f"MCQ / {s['w_mcq']:g}": _r(mcq_m),
                "Total / 100": _r(total)}
         if view == FINAL:
-            row["Result"] = "Pass" if total >= s["pass_mark"] - 1e-9 else "Fail"
+            row["Result"] = PASS if total >= s["pass_mark"] - 1e-9 else AT_RISK
         else:
             possible = (per_acc + per_ont) * n_ret + per_test * n_tests
             share = 100 * total / possible if possible else None
             row["Marks possible so far"] = _r(possible)
             row["% of possible so far"] = _r(share) if share is not None else None
-            row["Result"] = ("Not started" if not possible else
-                             "On track" if share >= s["pass_mark"] - 1e-9 else "At risk")
         row["Status not set"] = not_set
         for t in range(1, int(s["n_mcq"]) + 1):
             row[f"MCQ {t}"] = tm.get(t)

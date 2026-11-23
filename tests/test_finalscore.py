@@ -46,7 +46,7 @@ def test_late_gets_no_on_time_marks_and_missing_returns_count_zero():
     evals = [ev("A", c, 1.0, on_time=0) for c in CASES[:6]]           # 6 returns, all late; 6 never submitted
     r = row(final_scores(STUDENTS, evals, [], CASES, S), "A")
     assert r["Accuracy / 60"] == 30 and r["On-time / 20"] == 0 and r["Returns evaluated"] == "6 / 12"
-    assert r["Total / 100"] == 30 and r["Result"] == "Fail"
+    assert r["Total / 100"] == 30 and r["Result"] == "At risk"
 
 
 def test_status_not_set_is_counted_and_reported():
@@ -77,12 +77,11 @@ def test_so_far_view_adds_fixed_marks_and_compares_with_what_was_possible():
     # 5 marks a return x 0.9 x 2 = 9; 1.67 x 2 on time = 3.33; 5 marks a test x 45/50 = 4.5 -> 16.83, not scaled
     assert a["Returns evaluated"] == "2 / 2" and a["Accuracy / 60"] == 9 and a["On-time / 20"] == 3.33
     assert a["MCQ / 20"] == 4.5 and a["Total / 100"] == 16.83
-    assert a["Marks possible so far"] == 18.33 and a["% of possible so far"] == 91.82 and a["Result"] == "On track"
+    assert a["Marks possible so far"] == 18.33 and a["% of possible so far"] == 91.82 and "Result" not in a
     assert b["Returns evaluated"] == "1 / 2" and b["Not submitted"] == 1 and b["Total / 100"] == 2
-    assert b["Result"] == "At risk"                                          # missed M02, late on M01
-    assert c["Returns evaluated"] == "0 / 0" and c["Result"] == "Not started"   # batch B2 has not started
+    assert c["Returns evaluated"] == "0 / 0" and c["Marks possible so far"] == 0   # batch B2 has not started
     fin = row(final_scores(STUDENTS, evals, mcq, CASES, S, view=FINAL), "A")
-    assert fin["Total / 100"] == 16.83 and fin["Result"] == "Fail"          # same marks in both views
+    assert fin["Total / 100"] == 16.83 and fin["Result"] == "At risk"          # same marks in both views
 
 
 def test_each_mock_and_on_time_submission_is_worth_a_fixed_share():
