@@ -28,6 +28,8 @@ from make_keys import draft_from_return
 from finalscore import (FINAL, LABELS, SO_FAR, MCQError, check_settings, final_scores, load_settings, per_item,
                         parse_mcq)
 from metrics import flag, rebuild_rows, return_metrics
+from roster_flag import (NOT_ON_ROSTER, add_roster_column, callout_html, excel_bytes, highlight_excel_sheet,
+                         not_on_roster, off_roster_ids, style_off_roster)
 from readers import read_return
 from report_pdf import build_report
 from scorecard import results_workbook, scorecard_pdf
@@ -308,8 +310,9 @@ with t_eval:
             known = db.student(sid) if (db and sid) else None
             sname = c1.text_input("Student name", value=(known or {}).get("name") or "", key=f"sn{ss.uploader_n}_{sid}")
             if db and sid and not known:
-                st.caption("This student ID is not on the roster yet - add it under 'Students & batches' so it "
-                           "appears in batch reports.")
+                st.markdown(callout_html([sid], "student ID", "It will be evaluated and saved, but it won't appear "
+                                         "in final results or batch reports until you add it under "
+                                         "<b>Students &amp; batches</b>."), unsafe_allow_html=True)
             if sid and not re.fullmatch(r"[A-Z0-9-]{1,40}", sid):
                 st.error("Student ID may only contain letters, digits and '-' (up to 40 characters).")
                 sid = ""
@@ -471,14 +474,18 @@ with t_eval:
                                "matched by the ID or name found in the folder or file name: "
                                + ", ".join(f"{r['Student ID']} {r['Name']}".strip() for _, r in misnamed.iterrows())[:600]
                                + ". Check these rows, and ask the students to name their folders properly next time.")
-                st.dataframe(df, hide_index=True)
+                roster_now = {x["student_id"] for x in db.students()} if db else set()
+                if db:
+                    df = add_roster_column(df, roster_now)
+                    off = off_roster_ids(df["Student ID"], roster_now)
+                    if off:
+                        st.markdown(callout_html(off, "student(s) in this upload are"), unsafe_allow_html=True)
+                st.dataframe(style_off_roster(df), hide_index=True)
                 d1, d2 = st.columns(2)
                 if bo["zip"] and n_ok:
                     d1.download_button("Download all reports (zip)", bo["zip"],
                                        file_name=f"Evaluation_reports_{k.case_id}_{bo['when']}.zip")
-                xb = io.BytesIO()
-                df.to_excel(xb, index=False)
-                d2.download_button("Download this upload's results (Excel)", xb.getvalue(),
+                d2.download_button("Download this upload's results (Excel)", excel_bytes([("Results", df)]),
                                    file_name=f"Bulk_results_{k.case_id}_{bo['when']}.xlsx")
                 if not db:
                     st.caption("No database: download these now - they are not saved anywhere else.")
@@ -591,6 +598,14 @@ with t_mgmt:
                                "(evaluated before this feature) and earn no on-time marks. Set them under "
                                "**Submission status**.")
                 st.dataframe(df, hide_index=True, use_container_width=True)
+                off_df = not_on_roster(db.evaluations(), [x["student_id"] for x in all_students], fcases)
+                if not off_df.empty:
+                    st.markdown(callout_html(off_df["Student ID"].tolist(), "student(s) with evaluated mock returns "
+                                             "are", "Their returns are saved but are <b>not counted</b> in these "
+                                             "results. Add them under <b>Students &amp; batches</b> (or erase "
+                                             "them under Admin if they are test entries)."),
+                                unsafe_allow_html=True)
+                    st.dataframe(style_off_roster(off_df), hide_index=True, use_container_width=True)
                 stamp = datetime.now().strftime("%Y%m%d")
                 d1, d2 = st.columns(2)
                 d1.download_button("Download results (Excel)", results_workbook(df, cfg, db.status_history(), view),
@@ -639,8 +654,15 @@ with t_mgmt:
                 else:
                     lab = {1: "On time", 0: "Late", None: "Not set"}
                     base = pd.DataFrame([{"Student ID": e["student_id"], "Name": e.get("name") or "",
-                                          "Batch": e.get("batch") or "", "Score /100": round(100 * (e["pct"] or 0), 1),
+                                          "Batch": (e.get("batch") or "") if e["student_id"] in roster
+                                          else NOT_ON_ROSTER, "Score /100": round(100 * (e["pct"] or 0), 1),
                                           "Submission": lab.get(e.get("on_time"), "Not set")} for e in evs_c])
+                    off_c = sorted(e["student_id"] for e in evs_c if e["student_id"] not in roster)
+                    if off_c:
+                        st.markdown(callout_html(off_c, "evaluated student(s) for this case are",
+                                                 "Their Batch shows NOT ON ROSTER below. Add them under "
+                                                 "<b>Students &amp; batches</b> so they count in results."),
+                                    unsafe_allow_html=True)
                     edited = st.data_editor(
                         base, hide_index=True, use_container_width=True, key=f"sub_ed_{cs}_{bsel}",
                         disabled=["Student ID", "Name", "Batch", "Score /100"],
@@ -681,6 +703,7 @@ with t_mgmt:
                     c_runs = []
                 nr_df, imp_df = case_submissions(c_studs, db.evaluations(), c_runs, cs,
                                                  None if bsel == "All batches" else bsel)
+                imp_df = add_roster_column(imp_df, [x["student_id"] for x in all_students])
                 n_roster = sum(1 for x in c_studs if bsel == "All batches" or x["batch"] == bsel)
                 n_imp = int((imp_df["Student ID"] != "").sum())
                 st.markdown(f"**{len(evs_c)}** evaluated · **{n_imp}** improper submission(s) · "
@@ -695,7 +718,7 @@ with t_mgmt:
                                "evaluated but not named StudentID_CaseID. A failed upload that was evaluated later "
                                "drops off this list. These students earn no marks for this case until their return is "
                                "evaluated.")
-                    st.dataframe(imp_df, hide_index=True, use_container_width=True,
+                    st.dataframe(style_off_roster(imp_df), hide_index=True, use_container_width=True,
                                  column_config={"Details": st.column_config.TextColumn(width="large")})
                 st.markdown("##### Not received (did not attempt)")
                 if nr_df.empty:
@@ -705,13 +728,8 @@ with t_mgmt:
                                "on record. They earn 0 accuracy and 0 on-time marks for it.")
                     st.dataframe(nr_df, hide_index=True, use_container_width=True)
                 if not imp_df.empty or not nr_df.empty:
-                    xb = io.BytesIO()
-                    with pd.ExcelWriter(xb, engine="openpyxl") as xw:
-                        (imp_df if not imp_df.empty else pd.DataFrame({"": ["None"]})).to_excel(
-                            xw, sheet_name="Improper submissions", index=False)
-                        (nr_df if not nr_df.empty else pd.DataFrame({"": ["None"]})).to_excel(
-                            xw, sheet_name="Not received", index=False)
-                    st.download_button("Download both lists (Excel)", xb.getvalue(),
+                    st.download_button("Download both lists (Excel)",
+                                       excel_bytes([("Improper submissions", imp_df), ("Not received", nr_df)]),
                                        file_name=f"Submissions_{clean(cs)}_{clean(bsel)}_{cs_stamp}.xlsx")
                 hist = db.status_history(case_id=cs)
                 with st.expander(f"Change history for {cs} ({len(hist)})"):
@@ -753,9 +771,10 @@ with t_mgmt:
                     st.write(f"**{len(recs)}** marks for **{len({r[0] for r in recs})}** students, "
                              f"test(s) {', '.join(map(str, tests))}.")
                     if unknown:
-                        st.warning(f"{len(unknown)} student ID(s) are not on the roster and will be saved anyway "
-                                   f"(they show in results once added to the roster): {', '.join(unknown[:15])}"
-                                   + (" ..." if len(unknown) > 15 else ""))
+                        st.markdown(callout_html(unknown, "student ID(s) in this sheet are",
+                                                 "Their marks will be saved anyway and show in results once they "
+                                                 "are added under <b>Students &amp; batches</b>."),
+                                    unsafe_allow_html=True)
                     if st.button("Save MCQ marks", type="primary"):
                         db.save_mcq(recs, staff or "")
                         st.success(f"{len(recs)} marks saved.")
@@ -1249,7 +1268,8 @@ with t_find:
                     st.caption("Counts cover only the chosen batches.")
 
                 def run_workbook(run_ids):
-                    rows_df = rows_f[rows_f["run_id"].isin(run_ids)].drop(columns=["run_id"])
+                    rows_df = add_roster_column(rows_f[rows_f["run_id"].isin(run_ids)].drop(columns=["run_id"]),
+                                                roster_b)
                     up_df = pd.DataFrame([u for u in all_up if u["run_id"] in run_ids]).drop(
                         columns=["run_id"], errors="ignore")
                     meta = table[[r["run_id"] in run_ids for r in shown_runs]]
@@ -1264,6 +1284,7 @@ with t_find:
                             (df_ if not df_.empty else pd.DataFrame({"": ["None"]})).to_excel(
                                 xw, sheet_name=nm, index=False)
                         for ws in xw.book.worksheets:
+                            highlight_excel_sheet(ws)
                             ws.freeze_panes = "A2"
                             for col in ws.columns:
                                 ws.column_dimensions[col[0].column_letter].width = min(
@@ -1288,9 +1309,13 @@ with t_find:
                 view_ = one if status_f == "Everything" else one[
                     sv.str.startswith(status_f) if status_f != "To check" else sv.str.contains("CHECK|check",
                                                                                                regex=True)]
-                cols_ = [c_ for c_ in ["File", "Student ID", "Name", "Batch", "Score /100", "Submission", "Status",
-                                       "Notes"] if c_ in view_.columns]
-                st.dataframe(view_[cols_], hide_index=True, use_container_width=True,
+                view_ = add_roster_column(view_, roster_b)
+                cols_ = [c_ for c_ in ["File", "Student ID", "Roster", "Name", "Batch", "Score /100", "Submission",
+                                       "Status", "Notes"] if c_ in view_.columns]
+                off_run = off_roster_ids(view_["Student ID"], roster_b) if "Student ID" in view_ else []
+                if off_run:
+                    st.markdown(callout_html(off_run, "student(s) in this run are"), unsafe_allow_html=True)
+                st.dataframe(style_off_roster(view_[cols_]), hide_index=True, use_container_width=True,
                              column_config={"Status": st.column_config.TextColumn(width="large")})
                 up_one = [u for u in all_up if u["run_id"] == pick_run]
                 with st.expander(f"Files uploaded in this run ({len(up_one)})"):
@@ -1494,6 +1519,9 @@ each case, and gives every student a Simandhar-branded evaluation report with a 
 - **Final results**: marks add up return by return, out of 100, in both views. *Progress so far* also shows the
   marks possible from what the batch has done so far (no Pass / At risk there). *Final* gives **Pass**, or
   **At risk** when the total is below the pass mark.
+- Students **not on our roster** are shaded maroon with a **NOT ON ROSTER** tag wherever they appear (evaluation
+  results, submission status, final results, MCQ upload, run history and the Excel downloads). Their returns are
+  saved but don't count in results or batch reports until they are added under *Students & batches*.
 - **Submission status** lists, for each case, the evaluated returns, the **improper submissions** (could not be
   evaluated, no PDF, not matched to a student, named wrongly) and the students **not received** (did not attempt). Download the results in Excel and a
   Simandhar-branded scorecard PDF for each student.

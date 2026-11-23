@@ -152,3 +152,12 @@ def test_missing_returns_leaves_out_improper_submissions():
     mr = missing_returns(studs, evs, "B1", improper=imp)
     assert mr.empty                                   # A2's M02 is improper, not missing
     assert list(missing_returns(studs, evs, "B1")["Student ID"]) == ["A2"]
+
+
+def test_improper_submissions_from_students_not_on_the_roster_show_with_all_batches():
+    studs, evs = data()
+    rows = [{"case_id": "M02", "run_at": "2026-11-21", "Student ID": "ZZ9", "Name": "Zed", "File": "z.pdf",
+             "Status": "Failed - unreadable"}]
+    imp = improper_submissions(studs, evs, rows)
+    assert imp.iloc[0][["Student ID", "Batch"]].tolist() == ["ZZ9", "Not on roster"]
+    assert improper_submissions(studs, evs, rows, batch="B1").empty

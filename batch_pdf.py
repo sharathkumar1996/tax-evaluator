@@ -16,7 +16,7 @@ from scorecard import BODY, H1, H2, HEAD, SMALL
 
 TINY = ParagraphStyle("t", parent=BODY, fontSize=7.4, leading=9)
 TINY_HEAD = ParagraphStyle("th", parent=TINY, fontName=FONT_BOLD, textColor=colors.white)
-STATUS_COLOR = {"On track": GREEN, "Pass": GREEN, "At risk": RED, "Fail": RED, "Not started": GREY,
+STATUS_COLOR = {"Pass": GREEN,
                 "Very likely copied": RED, "Likely copied": AMBER, "Review": GREY}
 
 

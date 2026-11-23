@@ -65,8 +65,9 @@ def scorecard_pdf(row, returns, settings, institute, view=FINAL):
                               ("BOX", (0, 0), (-1, -1), 0.5, LINE), ("INNERGRID", (0, 0), (-1, -1), 0.4, LINE)]))
     story += [info, Spacer(1, 10)]
 
-    total, result = row["Total / 100"], row.get("Result") or ""
-    good = result == "Pass"
+    total = row["Total / 100"]
+    result = "Pass" if row.get("Result") == "Pass" else ""      # no "At risk" label on scorecards
+    good = True
     big = ParagraphStyle("big", parent=BODY, fontName=FONT_BOLD, fontSize=26, leading=30, textColor=MAROON)
     res = ParagraphStyle("res", parent=BODY, fontName=FONT_BOLD, fontSize=15, leading=18,
                          textColor=GREEN if good else RED)

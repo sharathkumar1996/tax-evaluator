@@ -155,13 +155,14 @@ def _problem(status):
     return None
 
 
-def improper_submissions(studs, evs, run_rows, batch=None, case_ids=None):
+def improper_submissions(studs, evs, run_rows, batch=None, case_ids=None, all_evaluations=None):
     """run_rows: db.run_rows(...). One row per student and case with the latest improper submission.
     A failed or skipped upload that was later evaluated is left out (it was put right); a wrongly named
     return that was evaluated stays in, so the student can be told. Files the system could not link to any
     student are listed (Student ID blank) only when all batches are shown."""
     roster = {s["student_id"]: s for s in studs}
     got = {(e["student_id"], e["case_id"]) for e in evs}
+    got_any = got | {(e["student_id"], e["case_id"]) for e in (all_evaluations or [])}
     wanted = set(case_ids) if case_ids is not None else None
     seen, rows = set(), []
     for r in run_rows:                                   # newest run first: the first row per student wins
@@ -176,9 +177,11 @@ def improper_submissions(studs, evs, run_rows, batch=None, case_ids=None):
         seen.add(key)
         if not prob:
             continue
-        if sid:
-            if sid not in roster:
+        if sid and sid not in roster:                    # not on our roster: shown with all batches only
+            if batch not in (None, ALL) or (prob != "Named incorrectly (evaluated)" and (sid, cid) in got_any):
                 continue
+            name, b = str(r.get("Name") or ""), "Not on roster"
+        elif sid:
             if batch not in (None, ALL) and roster[sid]["batch"] != batch:
                 continue
             if prob != "Named incorrectly (evaluated)" and (sid, cid) in got:
