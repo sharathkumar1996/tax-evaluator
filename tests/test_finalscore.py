@@ -68,17 +68,31 @@ def test_pass_mark_boundary():
     assert row(final_scores(STUDENTS, evals, mcq, CASES, S), "A")["Result"] == "Pass"
 
 
-def test_so_far_view_uses_what_the_batch_has_done():
+def test_so_far_view_adds_fixed_marks_and_compares_with_what_was_possible():
     # batch B1 has done 2 returns and test 1. Asha: both on time, 90%; test 1 = 45/50
     evals = [ev("A", "M01", 0.9), ev("A", "M02", 0.9), ev("B", "M01", 0.4, on_time=0)]
     mcq = [{"student_id": "A", "test_no": 1, "marks": 45}]
     df = final_scores(STUDENTS, evals, mcq, CASES, S, view=SO_FAR)
     a, b, c = row(df, "A"), row(df, "B"), row(df, "C")
-    assert a["Returns evaluated"] == "2 / 2" and a["Accuracy / 60"] == 54 and a["On-time / 20"] == 20
-    assert a["MCQ / 20"] == 18 and a["Total / 100"] == 92 and a["Result"] == "On track"
-    assert b["Returns evaluated"] == "1 / 2" and b["Result"] == "At risk"   # missed M02, late on M01
+    # 5 marks a return x 0.9 x 2 = 9; 1.67 x 2 on time = 3.33; 5 marks a test x 45/50 = 4.5 -> 16.83, not scaled
+    assert a["Returns evaluated"] == "2 / 2" and a["Accuracy / 60"] == 9 and a["On-time / 20"] == 3.33
+    assert a["MCQ / 20"] == 4.5 and a["Total / 100"] == 16.83
+    assert a["Marks possible so far"] == 18.33 and a["% of possible so far"] == 91.82 and a["Result"] == "On track"
+    assert b["Returns evaluated"] == "1 / 2" and b["Not submitted"] == 1 and b["Total / 100"] == 2
+    assert b["Result"] == "At risk"                                          # missed M02, late on M01
     assert c["Returns evaluated"] == "0 / 0" and c["Result"] == "Not started"   # batch B2 has not started
-    assert row(final_scores(STUDENTS, evals, mcq, CASES, S, view=FINAL), "A")["Result"] == "Fail"
+    fin = row(final_scores(STUDENTS, evals, mcq, CASES, S, view=FINAL), "A")
+    assert fin["Total / 100"] == 16.83 and fin["Result"] == "Fail"          # same marks in both views
+
+
+def test_each_mock_and_on_time_submission_is_worth_a_fixed_share():
+    # one mock at 100, on time -> 5 accuracy + 1.67 on-time; all 12 at 100 on time -> 60 + 20
+    one = row(final_scores(STUDENTS, [ev("A", "M01", 1.0)], [], CASES, S), "A")
+    assert one["Accuracy / 60"] == 5 and one["On-time / 20"] == 1.67 and one["Total / 100"] == 6.67
+    all12 = row(final_scores(STUDENTS, [ev("A", c, 1.0) for c in CASES], [], CASES, S), "A")
+    assert all12["Accuracy / 60"] == 60 and all12["On-time / 20"] == 20 and all12["Total / 100"] == 80
+    half = row(final_scores(STUDENTS, [ev("A", "M01", 0.5, on_time=0)], [], CASES, S), "A")
+    assert half["Accuracy / 60"] == 2.5 and half["On-time / 20"] == 0
 
 
 def test_settings_are_read_and_checked():

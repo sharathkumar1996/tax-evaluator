@@ -111,7 +111,7 @@ def _bar_chart(mocks, W, cohort_avg=None):
 
 
 def batch_report_pdf(batch, trainer, summary, students, mocks, missing, mistakes, integ, cfg, institute,
-                     cohort_avg=None, integrity_ran=True, caution=""):
+                     cohort_avg=None, integrity_ran=True, caution="", improper=None):
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=14 * mm, rightMargin=14 * mm, topMargin=13 * mm,
                             bottomMargin=15 * mm, title=f"Batch report - {batch}", author=institute)
@@ -147,18 +147,30 @@ def batch_report_pdf(batch, trainer, summary, students, mocks, missing, mistakes
 
     story.append(CondPageBreak(60 * mm))
     story.append(Paragraph("Students - progress so far", H2))
-    story.append(Paragraph(f"Score out of 100 from the returns and MCQ tests this batch has done so far "
-                           f"(accuracy {cfg['w_accuracy']:g} + on-time {cfg['w_on_time']:g} + MCQ {cfg['w_mcq']:g}, "
-                           "scaled to 100). Lowest first, so the students who need help are at the top.", SMALL))
-    st_cols = ["Student ID", "Name", "Returns evaluated", "Average return score", "On time", "Late", "MCQ marks",
-               "Total / 100", "Result"]
-    stab = students[st_cols].sort_values("Total / 100").rename(columns={"Returns evaluated": "Returns",
-                                                                        "Average return score": "Avg return %"})
-    story.append(_table(stab, [14, 30, 10, 11, 8, 7, 12, 10, 12], W, status_col="Result"))
+    pa, po = cfg["w_accuracy"] / cfg["n_mocks"], cfg["w_on_time"] / cfg["n_mocks"]
+    story.append(Paragraph(f"Marks out of 100 earned so far. Each mock return is worth {pa:.2f} accuracy marks (in "
+                           f"proportion to its score) and {po:.2f} on-time marks; each MCQ test "
+                           f"{cfg['w_mcq'] / cfg['n_mcq'] if cfg['n_mcq'] else 0:.2f} marks. 'Possible' = the marks "
+                           f"the returns and tests done so far were worth; On track = at least {cfg['pass_mark']:g}% "
+                           "of them. Lowest first, so the students who need help are at the top.", SMALL))
+    st_cols = ["Student ID", "Name", "Returns evaluated", "Average return score", "On time", "Late",
+               "Total / 100", "Marks possible so far", "% of possible so far", "Result"]
+    stab = students[st_cols].sort_values(["% of possible so far", "Total / 100"]).rename(
+        columns={"Returns evaluated": "Returns", "Average return score": "Avg return %", "Total / 100": "Marks",
+                 "Marks possible so far": "Possible", "% of possible so far": "% of possible"})
+    story.append(_table(stab, [14, 30, 10, 11, 8, 7, 9, 9, 10, 12], W, status_col="Result"))
 
     story.append(CondPageBreak(50 * mm))
     story.append(Paragraph("Returns not received", H2))
     story.append(_table(missing.drop(columns=["Batch"]) if not missing.empty else missing, [14, 30, 9, 60], W))
+
+    if improper is not None:
+        story.append(CondPageBreak(40 * mm))
+        story.append(Paragraph("Improper submissions", H2))
+        story.append(Paragraph("Returns that came in but could not be evaluated (unreadable, no PDF, wrong file "
+                               "type) or were evaluated but not named StudentID_CaseID.", SMALL))
+        story.append(_table(improper[["Student ID", "Name", "Case", "Problem", "Details"]] if not improper.empty
+                            else improper, [14, 26, 9, 22, 50], W))
 
     story.append(CondPageBreak(50 * mm))
     story.append(Paragraph("Most common mistakes", H2))
@@ -204,15 +216,18 @@ def batch_report_pdf(batch, trainer, summary, students, mocks, missing, mistakes
     return buf.getvalue()
 
 
-def batch_report_excel(batch, trainer, summary, students, mocks, missing, mistakes, integ, integrity_ran=True):
+def batch_report_excel(batch, trainer, summary, students, mocks, missing, mistakes, integ, integrity_ran=True,
+                       improper=None):
     buf = io.BytesIO()
     head = pd.DataFrame([{"Item": k, "Value": v} for k, v in summary.items()])
     head = pd.concat([pd.DataFrame([{"Item": "Report", "Value": f"Batch report - {batch}"},
                                     {"Item": "Trainer", "Value": trainer or ""},
                                     {"Item": "Prepared on", "Value": datetime.now().strftime("%d %b %Y %H:%M")}]),
                       head[~head["Item"].isin(["Batch", "Trainer"])]])
-    sheets = [("Summary", head), ("Students", students), ("Mock returns", mocks), ("Not received", missing),
-              ("Common mistakes", mistakes)]
+    sheets = [("Summary", head), ("Students", students), ("Mock returns", mocks), ("Not received", missing)]
+    if improper is not None:
+        sheets.append(("Improper submissions", improper))
+    sheets.append(("Common mistakes", mistakes))
     if integrity_ran:
         sheets += [("Integrity - students", integ["students"]), ("Integrity - pairs", integ["pairs"]),
                    ("Integrity - trainer file", integ["trainer"])]

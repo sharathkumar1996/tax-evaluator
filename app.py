@@ -25,7 +25,7 @@ from grader_core import KeyError_, fmt, grade, load_key, summarise
 from integrity import TRAINER, analyse, fingerprints
 from irs_reader import ReaderError
 from make_keys import draft_from_return
-from finalscore import (FINAL, LABELS, SO_FAR, MCQError, check_settings, final_scores, load_settings,
+from finalscore import (FINAL, LABELS, SO_FAR, MCQError, check_settings, final_scores, load_settings, per_item,
                         parse_mcq)
 from metrics import flag, rebuild_rows, return_metrics
 from readers import read_return
@@ -551,17 +551,21 @@ with t_mgmt:
 
         # ---------------------------------------------------------- final results
         with m_res:
+            pa, po, pt = per_item(cfg)
             st.caption(f"Return accuracy {cfg['w_accuracy']:g} + on-time submission {cfg['w_on_time']:g} + MCQ tests "
-                       f"{cfg['w_mcq']:g} = 100. Pass mark {cfg['pass_mark']:g}. {cfg['n_mocks']:g} mock returns "
+                       f"{cfg['w_mcq']:g} = 100. Each mock return is worth {pa:.2f} accuracy marks (in proportion "
+                       f"to its score) and {po:.2f} on-time marks; each MCQ test {pt:.2f} marks. Marks add up as the "
+                       f"course goes on. Pass mark {cfg['pass_mark']:g}. {cfg['n_mocks']:g} mock returns "
                        f"({len(fcases)} set up so far), {cfg['n_mcq']:g} MCQ tests of {cfg['mcq_out_of']:g} marks.")
             if len(fcases) > cfg["n_mocks"]:
                 st.warning(f"{len(fcases)} cases count toward the final score but the course has {cfg['n_mocks']:g} "
                            "mock returns. Untick the practice cases under **Scoring settings**.")
             r1, r2 = st.columns([1, 2])
             view = r1.radio("View", ["Progress so far", "Final (course complete)"], key="fs_view",
-                            help="Progress so far: only the returns and MCQ tests the student's batch has done "
-                                 "count, scaled to 100. Final: every mock return and test counts; missing ones "
-                                 "count 0.")
+                            help="Both views show the marks earned so far out of 100. Progress so far also "
+                                 "shows the marks that were possible from the returns and tests the batch has done; "
+                                 "On track = at least the pass mark % of those. Final: Pass / Fail on the marks "
+                                 "out of 100.")
             view = SO_FAR if view.startswith("Progress") else FINAL
             batches = sorted({x["batch"] or "" for x in all_students})
             pick_b = r2.multiselect("Batches", batches, default=batches, key="fs_batches")
@@ -663,6 +667,48 @@ with t_mgmt:
                         n = db.set_on_time([(sid, cs, True) for sid in unset], who.strip(), why.strip())
                         st.success(f"{n} status(es) set to On time.")
                         st.rerun()
+                # students who did not submit, or whose submission could not be evaluated
+                from batchreport import case_submissions
+                c_studs = [dict(x, batch=x["batch"] or "") for x in all_students]
+                try:
+                    c_runs = db.run_rows([cs])
+                except Exception:
+                    log.exception("reading the evaluation runs failed")
+                    c_runs = []
+                nr_df, imp_df = case_submissions(c_studs, db.evaluations(), c_runs, cs,
+                                                 None if bsel == "All batches" else bsel)
+                n_roster = sum(1 for x in c_studs if bsel == "All batches" or x["batch"] == bsel)
+                n_imp = int((imp_df["Student ID"] != "").sum())
+                st.markdown(f"**{len(evs_c)}** evaluated · **{n_imp}** improper submission(s) · "
+                            f"**{len(nr_df)}** not received - of {n_roster} student(s) on the roster")
+                cs_stamp = datetime.now().strftime("%Y%m%d")
+                st.markdown("##### Improper submissions")
+                if imp_df.empty:
+                    st.caption("None - every return that came in for this case was evaluated and named properly.")
+                else:
+                    st.caption("Returns that came in but could not be evaluated (unreadable PDF, no PDF in the "
+                               "folder, wrong file type), files that could not be matched to a student, and returns "
+                               "evaluated but not named StudentID_CaseID. A failed upload that was evaluated later "
+                               "drops off this list. These students earn no marks for this case until their return is "
+                               "evaluated.")
+                    st.dataframe(imp_df, hide_index=True, use_container_width=True,
+                                 column_config={"Details": st.column_config.TextColumn(width="large")})
+                st.markdown("##### Not received (did not attempt)")
+                if nr_df.empty:
+                    st.caption("Every student on the roster has submitted this case.")
+                else:
+                    st.caption("Students on the roster with no return for this case - not evaluated and no upload "
+                               "on record. They earn 0 accuracy and 0 on-time marks for it.")
+                    st.dataframe(nr_df, hide_index=True, use_container_width=True)
+                if not imp_df.empty or not nr_df.empty:
+                    xb = io.BytesIO()
+                    with pd.ExcelWriter(xb, engine="openpyxl") as xw:
+                        (imp_df if not imp_df.empty else pd.DataFrame({"": ["None"]})).to_excel(
+                            xw, sheet_name="Improper submissions", index=False)
+                        (nr_df if not nr_df.empty else pd.DataFrame({"": ["None"]})).to_excel(
+                            xw, sheet_name="Not received", index=False)
+                    st.download_button("Download both lists (Excel)", xb.getvalue(),
+                                       file_name=f"Submissions_{clean(cs)}_{clean(bsel)}_{cs_stamp}.xlsx")
                 hist = db.status_history(case_id=cs)
                 with st.expander(f"Change history for {cs} ({len(hist)})"):
                     if hist:
@@ -767,8 +813,8 @@ with t_batch:
         import json
 
         from batch_pdf import batch_report_excel, batch_report_pdf
-        from batchreport import (ALL, batch_summary, integrity_for, missing_returns, mock_table, mock_trend, prepare,
-                                 score_bands, top_mistakes)
+        from batchreport import (ALL, batch_summary, improper_submissions, integrity_for, missing_returns, mock_table,
+                                 mock_trend, prepare, score_bands, top_mistakes)
         from integrity_report import CAUTION as INTEG_CAUTION
 
         bcfg = load_settings(db.settings())
@@ -800,6 +846,12 @@ with t_batch:
                 ids_sel = {x["student_id"] for x in studs}
                 evs = [e for e in b_evs_all if e["case_id"] in sel_c and e["student_id"] in ids_sel]
                 mcq_all = db.mcq_scores()
+                try:
+                    b_runs = db.run_rows(sel_c)
+                except Exception:
+                    log.exception("reading the evaluation runs failed")
+                    b_runs = []
+                improper_all = improper_submissions(studs, evs, b_runs, case_ids=sel_c)
                 with st.spinner("Checking integrity..."):
                     integ = _integrity_cached([e for e in b_evs_all if e["case_id"] in sel_c], tuple(sel_c))
                 summary = batch_summary(studs, evs, mcq_all, sel_c, bcfg,
@@ -819,7 +871,8 @@ with t_batch:
                     k[2].metric("On-time rate", pc(all_row["On-time rate %"]))
                     k[3].metric("Average score", pc(all_row["Average score %"]))
                     k[4].metric("At risk", int(all_row["At risk"]),
-                                help=f"Progress score below the pass mark of {bcfg['pass_mark']:g}")
+                                help=f"Marks earned are below {bcfg['pass_mark']:g}% of the marks possible from "
+                                     "the returns and tests the batch has done so far")
                     k[5].metric("Integrity flags", int(all_row["Integrity flags"]),
                                 help="Students rated likely or very likely copied")
                     st.markdown("##### Batch comparison")
@@ -883,8 +936,8 @@ with t_batch:
                     k[3].metric("Average score", pc(row["Average score %"]), delta("Average score %"))
                     k[4].metric("On track / At risk", f"{int(row['On track'])} / {int(row['At risk'])}")
                     k[5].metric("Integrity flags", int(row["Integrity flags"]))
-                    s1, s2, s3, s4, s5 = st.tabs(["Students", "Mock returns", "Not received", "Common mistakes",
-                                                  "Integrity"])
+                    s1, s2, s3, s4, s5 = st.tabs(["Students", "Mock returns", "Not received / improper",
+                                                  "Common mistakes", "Integrity"])
                     with s1:
                         g1, g2 = st.columns([1, 2])
                         res_pick = g1.multiselect("Show", ["At risk", "On track", "Not started"],
@@ -894,22 +947,37 @@ with t_batch:
                         if q.strip():
                             view_df = view_df[view_df["Name"].str.contains(q, case=False, na=False) |
                                               view_df["Student ID"].str.contains(q, case=False, na=False)]
-                        st.dataframe(view_df.sort_values("Total / 100"), hide_index=True, use_container_width=True,
+                        st.caption(f"Total / 100 = marks earned so far (each mock return is worth "
+                                   f"{per_item(bcfg)[0]:.2f} accuracy + {per_item(bcfg)[1]:.2f} on-time marks). "
+                                   f"On track = at least {bcfg['pass_mark']:g}% of the marks possible so far.")
+                        st.dataframe(view_df.sort_values(["% of possible so far", "Total / 100"]), hide_index=True,
+                                     use_container_width=True,
                                      column_config={"Total / 100": st.column_config.ProgressColumn(
-                                         format="%.1f", min_value=0, max_value=100)})
+                                         format="%.2f", min_value=0, max_value=100),
+                                         "% of possible so far": st.column_config.NumberColumn(format="%.1f%%")})
                         bands = score_bands(scores)
                         if bands["Students"].sum():
-                            st.markdown("##### How the batch is spread")
+                            st.markdown("##### How the batch is spread (% of marks possible so far)")
                             st.bar_chart(bands, x="Score band", y="Students", color=color_of[pick], height=220)
                     with s2:
                         st.dataframe(mock_table(studs, evs, sel_c, b_case_info, pick), hide_index=True,
                                      use_container_width=True)
                     with s3:
-                        mr = missing_returns(studs, evs, pick)
+                        imp_b = improper_submissions(studs, evs, b_runs, pick, case_ids=sel_c)
+                        mr = missing_returns(studs, evs, pick, improper=imp_b)
+                        st.markdown("##### Not received (did not attempt)")
                         st.write("Every return is in." if mr.empty else
                                  f"**{len(mr)}** student(s) have mock returns not received.")
                         if not mr.empty:
                             st.dataframe(mr, hide_index=True, use_container_width=True)
+                        st.markdown("##### Improper submissions")
+                        if imp_b.empty:
+                            st.write("None.")
+                        else:
+                            st.write(f"**{len(imp_b)}** return(s) came in but could not be evaluated, or were named "
+                                     "wrongly.")
+                            st.dataframe(imp_b, hide_index=True, use_container_width=True,
+                                         column_config={"Details": st.column_config.TextColumn(width="large")})
                     with s4:
                         st.caption("The lines most often wrong in this batch - good topics for a revision class.")
                         st.dataframe(top_mistakes(db.mistakes(), evs, pick, limit=25), hide_index=True,
@@ -935,12 +1003,13 @@ with t_batch:
                     bs = [x for x in studs if x["batch"] == b]
                     sc = final_scores(bs, evs, mcq_all, sel_c, bcfg, view=SO_FAR)
                     r_ = summary.set_index("Batch").loc[b].to_dict()
+                    imp_ = improper_submissions(studs, evs, b_runs, b, case_ids=sel_c)
                     args = (b, trainers.get(b, {}).get("trainer", ""), r_, sc,
-                            mock_table(studs, evs, sel_c, b_case_info, b), missing_returns(studs, evs, b),
+                            mock_table(studs, evs, sel_c, b_case_info, b), missing_returns(studs, evs, b, improper=imp_),
                             top_mistakes(db.mistakes(), evs, b), integrity_for(integ, b))
                     return (batch_report_pdf(*args, bcfg, institute, cohort_avg=all_row["Average score %"],
-                                             integrity_ran=integ is not None, caution=INTEG_CAUTION),
-                            batch_report_excel(*args, integrity_ran=integ is not None))
+                                             integrity_ran=integ is not None, caution=INTEG_CAUTION, improper=imp_),
+                            batch_report_excel(*args, integrity_ran=integ is not None, improper=imp_))
 
                 with r_tab:
                     st.write("One consolidated report per batch for its trainer: a Simandhar-branded PDF and an "
@@ -1414,17 +1483,20 @@ each case, and gives every student a Simandhar-branded evaluation report with a 
 ### Final course score (Management dashboard)
 | Part | Marks | How |
 |---|---|---|
-| Return accuracy | 60 | average score of the 12 mock returns; a return not submitted counts 0 |
-| On-time submission | 20 | 20 / 12 = 1.67 marks for each return submitted on time; a late return earns none |
-| MCQ tests | 20 | total of the 4 tests (50 marks each) out of 200 |
+| Return accuracy | 60 | 60 / 12 = 5 marks per mock return, in proportion to its score (100/100 = 5, 80/100 = 4); 12 returns at 100 = 60; a return not submitted earns 0 |
+| On-time submission | 20 | 20 / 12 = 1.67 marks for each return submitted on time; all 12 on time = 20; a late return earns none |
+| MCQ tests | 20 | 20 / 4 = 5 marks per test, in proportion to its marks out of 50 |
 
 **Pass mark: 70.** These numbers can be changed under *Scoring settings* (admin password).
 - **On time or late** is chosen when you evaluate: for one return, or for the whole batch with a list of exceptions.
   Re-evaluating a return keeps its status. Staff and admin can change it later under *Submission status*;
   every change records who made it, why and when.
 - **MCQ marks**: upload an Excel/CSV with *Student ID* and *Test 1* ... *Test 4* columns under *MCQ test marks*.
-- **Final results**: *Progress so far* counts only the returns and tests a batch has done (scaled to 100) and shows
-  who is at risk; *Final* counts everything, missing work as 0. Download the results in Excel and a
+- **Final results**: marks add up return by return, out of 100, in both views. *Progress so far* also shows the
+  marks possible from what the batch has done so far: **On track** = at least the pass mark % of those, else
+  **At risk**. *Final* gives Pass / Fail on the total.
+- **Submission status** lists, for each case, the evaluated returns, the **improper submissions** (could not be
+  evaluated, no PDF, not matched to a student, named wrongly) and the students **not received** (did not attempt). Download the results in Excel and a
   Simandhar-branded scorecard PDF for each student.
 - Under *Scoring settings*, tick only the cases that are the course's mock returns, so practice cases don't count.
 

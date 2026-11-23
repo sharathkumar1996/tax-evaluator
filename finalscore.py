@@ -1,18 +1,22 @@
 """
 finalscore.py - the student's final course score out of 100.
 
-  Return accuracy  60   average score of the course's mock returns (each out of 100); a return that was
-                        never evaluated counts 0. All mock returns count (no "best of").
-  On-time          20   the same marks for every mock return submitted on time (20 / 12 = 1.67 each);
-                        a late return gets 0 on-time marks - there is no part credit.
-  MCQ tests        20   total MCQ marks / (tests x marks per test); a test not taken counts 0.
+Every mock return and every MCQ test is worth a fixed share of the 100 marks, and a student keeps adding marks
+as the course goes on (nothing is averaged over "what's done so far" or scaled up):
+
+  Return accuracy  60   60 / 12 = 5 marks per mock return, earned in proportion to its score
+                        (100/100 -> 5 marks, 80/100 -> 4 marks). 12 returns at 100 -> 60.
+                        A return not submitted (or not evaluated) earns 0.
+  On-time          20   20 / 12 = 1.67 marks for each mock return submitted on time. All 12 on time -> 20.
+                        A late return earns 0 on-time marks - there is no part credit.
+  MCQ tests        20   20 / 4 = 5 marks per test, in proportion to its marks (50/50 -> 5). A test not taken: 0.
   Pass mark        70
 
-Two views:
-  * "final"   - the whole course: every mock return and MCQ test counts, missing ones as 0.
-  * "so far"  - only what the student's batch has done so far: the mock returns evaluated for anyone in
-                the batch and the MCQ tests with marks for anyone in the batch. Shows where a student stands
-                while there is still time to improve.
+Two views; the marks are the same in both:
+  * "final"   - the whole course; Pass / Fail against the pass mark.
+  * "so far"  - also shows the marks that were possible from the returns and tests the student's batch has
+                done so far, and the student's share of them. "On track" = that share is at least the pass mark
+                (e.g. 70% of the marks possible so far), "At risk" = below it.
 The numbers (12 returns, 60/20/20, 4 tests of 50, pass 70) are settings, changeable in the app.
 """
 import re
@@ -55,11 +59,20 @@ def _r(x):
     return round(float(x) + 1e-9, 2)
 
 
+def per_item(settings):
+    """Marks one mock return (accuracy at 100%, on time) and one MCQ test (full marks) are worth."""
+    s = settings
+    return (s["w_accuracy"] / s["n_mocks"] if s["n_mocks"] else 0,
+            s["w_on_time"] / s["n_mocks"] if s["n_mocks"] else 0,
+            s["w_mcq"] / s["n_mcq"] if s["n_mcq"] else 0)
+
+
 def final_scores(students, evaluations, mcq, final_cases, settings, view=FINAL):
-    """students: [{student_id, name, batch}]; evaluations: [{student_id, case_id, pct, on_time}];
+    """students: [{student_id, name, batch}]; evaluations: [{student_id, case_id, pct, on_time}] (pct 0-1);
     mcq: [{student_id, test_no, marks}]; final_cases: case IDs that are the course's mock returns.
     Returns a DataFrame, one row per student on the roster."""
     s = settings
+    per_acc, per_ont, per_test = per_item(s)
     final = set(final_cases)
     batch_of = {x["student_id"]: (x.get("batch") or "") for x in students}
     ev = [e for e in evaluations if e["case_id"] in final and e["student_id"] in batch_of]
@@ -88,33 +101,38 @@ def final_scores(students, evaluations, mcq, final_cases, settings, view=FINAL):
             n_tests = len(done_tests.get(b, ()))
         else:
             n_ret, n_tests = int(s["n_mocks"]), int(s["n_mcq"])
-        pct_sum = sum(float(e["pct"] or 0) for e in mine)
+        pct_sum = sum(min(max(float(e["pct"] or 0), 0), 1) for e in mine)
         on_time = sum(1 for e in mine if e.get("on_time") == 1)
         late = sum(1 for e in mine if e.get("on_time") == 0)
         not_set = sum(1 for e in mine if e.get("on_time") is None)
         tm = marks.get(sid, {})
         mcq_total = sum(tm.values())
 
-        acc = s["w_accuracy"] * pct_sum / n_ret if n_ret else 0
-        ont = s["w_on_time"] * on_time / n_ret if n_ret else 0
-        mcq_m = s["w_mcq"] * mcq_total / (n_tests * s["mcq_out_of"]) if n_tests else 0
+        # fixed marks per item, added up - the same in both views
+        acc = per_acc * pct_sum
+        ont = per_ont * on_time
+        mcq_m = per_test * mcq_total / s["mcq_out_of"] if s["mcq_out_of"] else 0
         total = acc + ont + mcq_m
-        # "so far": scale to 100 using only the parts that have started, so the score is comparable to the pass mark
-        possible = (s["w_accuracy"] + s["w_on_time"]) * bool(n_ret) + s["w_mcq"] * bool(n_tests)
-        shown = total if view == FINAL else (100 * total / possible if possible else 0)
         row = {"Student ID": sid, "Name": st.get("name") or "", "Batch": b,
                "Returns evaluated": f"{len(mine)} / {n_ret}",
+               "Not submitted": max(n_ret - len(mine), 0),
                "Average return score": _r(100 * pct_sum / n_ret) if n_ret else None,
                f"Accuracy / {s['w_accuracy']:g}": _r(acc),
                "On time": on_time, "Late": late,
                f"On-time / {s['w_on_time']:g}": _r(ont),
                "MCQ marks": f"{mcq_total:g} / {n_tests * s['mcq_out_of']:g}",
                f"MCQ / {s['w_mcq']:g}": _r(mcq_m),
-               "Total / 100": _r(shown),
-               "Result": ("Pass" if shown >= s["pass_mark"] - 1e-9 else "Fail") if view == FINAL else
-                         ("Not started" if not possible else
-                          "On track" if shown >= s["pass_mark"] - 1e-9 else "At risk"),
-               "Status not set": not_set}
+               "Total / 100": _r(total)}
+        if view == FINAL:
+            row["Result"] = "Pass" if total >= s["pass_mark"] - 1e-9 else "Fail"
+        else:
+            possible = (per_acc + per_ont) * n_ret + per_test * n_tests
+            share = 100 * total / possible if possible else None
+            row["Marks possible so far"] = _r(possible)
+            row["% of possible so far"] = _r(share) if share is not None else None
+            row["Result"] = ("Not started" if not possible else
+                             "On track" if share >= s["pass_mark"] - 1e-9 else "At risk")
+        row["Status not set"] = not_set
         for t in range(1, int(s["n_mcq"]) + 1):
             row[f"MCQ {t}"] = tm.get(t)
         rows.append(row)

@@ -53,14 +53,18 @@ stored. Erasing a student removes their rows from the history; admins can delete
 
 ## Final course score
 
-Management dashboard → *Final results*: return accuracy 60 (average of the 12 mock returns, missing = 0) +
-on-time submission 20 (1.67 per return on time, late = 0) + MCQ tests 20 (4 tests × 50 marks). Pass mark 70.
+Management dashboard → *Final results*: return accuracy 60 (5 marks per mock return × its score; 12 returns at
+100 = 60; missing = 0) + on-time submission 20 (1.67 per return on time, all 12 = 20; late = 0) + MCQ tests 20
+(5 marks per test × marks/50). Marks add up as the course goes on. Pass mark 70.
 All of these are settings (`finalscore.DEFAULTS`, changed in the app with the admin password).
 
 - On-time status is chosen when evaluating (single, or per batch with exceptions), kept on re-evaluation, and
   editable later by staff and admin with a change history (`submission_log`).
 - MCQ marks: Excel/CSV with *Student ID* and *Test 1..4* columns (or one *Marks* column plus the test number).
-- Views: *Progress so far* (only what the batch has done, scaled to 100, "On track / At risk") and *Final*.
+- Views: *Progress so far* (marks earned out of 100, plus marks possible from what the batch has done;
+  "On track" = at least 70% of those, else "At risk") and *Final* (Pass / Fail).
+- *Submission status* lists, per case, improper submissions (could not be evaluated, no PDF, not matched,
+  named wrongly) and students not received (did not attempt).
 - Downloads: results workbook (results, scoring settings, status changes) and a branded scorecard PDF per student
   (`scorecard.py`).
 

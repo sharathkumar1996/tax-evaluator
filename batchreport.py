@@ -9,7 +9,10 @@ done so far: a mock counts as "done" by a batch once any of its students has bee
                   MCQ average, integrity flags
   mock_table      per mock: returns received, on time, average / median / lowest / highest score
   top_mistakes    the lines most often wrong, with how many students got them wrong
-  missing_returns students with mock returns not received
+  missing_returns students with mock returns not received (an improper submission is listed separately)
+  improper_submissions  returns that came in but could not be evaluated (unreadable, no PDF in the folder ...),
+                  or were evaluated but named wrongly, taken from the evaluation-run history
+  case_submissions  for one mock return: who has not submitted and who submitted improperly
   integrity_for   the integrity findings that concern one batch
 """
 from collections import Counter, defaultdict
@@ -133,9 +136,74 @@ def top_mistakes(mistakes, evs, batch=None, limit=15):
     return df.sort_values(["% of returns", "Students wrong"], ascending=False).head(limit).reset_index(drop=True)
 
 
-def missing_returns(studs, evs, batch=None):
+IMPROPER_COLS = ["Student ID", "Name", "Batch", "Case", "Problem", "Details", "File", "When"]
+NOT_RECEIVED_COLS = ["Student ID", "Name", "Batch", "Case"]
+
+
+def _problem(status):
+    """The kind of improper submission a run row's Status describes, or None if it is not one."""
+    st = str(status or "")
+    low = st.lower()
+    if st.startswith("Failed"):
+        return "Could not be evaluated"
+    if st.startswith("Skipped"):
+        if "already evaluated" in low or "file is for case" in low:
+            return None
+        if "no pdf" in low or "not a pdf" in low:
+            return "No PDF / wrong file type"
+        return "Skipped"
+    if "CHECK NAME" in st:
+        return "Named incorrectly (evaluated)"
+    return None
+
+
+def improper_submissions(studs, evs, run_rows, batch=None, case_ids=None):
+    """run_rows: db.run_rows(...). One row per student and case with the latest improper submission.
+    A failed or skipped upload that was later evaluated is left out (it was put right); a wrongly named
+    return that was evaluated stays in, so the student can be told. Files the system could not link to any
+    student are listed (Student ID blank) only when all batches are shown."""
+    roster = {s["student_id"]: s for s in studs}
+    got = {(e["student_id"], e["case_id"]) for e in evs}
+    wanted = set(case_ids) if case_ids is not None else None
+    seen, rows = set(), []
+    for r in run_rows:                                   # newest run first: the first row per student wins
+        cid = r.get("case_id") or ""
+        if wanted is not None and cid not in wanted:
+            continue
+        prob = _problem(r.get("Status"))
+        sid = str(r.get("Student ID") or "").strip().upper()
+        key = (sid, cid) if sid else (r.get("File"), cid)
+        if key in seen:
+            continue
+        seen.add(key)
+        if not prob:
+            continue
+        if sid:
+            if sid not in roster:
+                continue
+            if batch not in (None, ALL) and roster[sid]["batch"] != batch:
+                continue
+            if prob != "Named incorrectly (evaluated)" and (sid, cid) in got:
+                continue                                 # evaluated since - put right
+            name, b = roster[sid].get("name") or "", roster[sid]["batch"]
+        else:
+            if batch not in (None, ALL):
+                continue
+            name, b, prob = "", "", "Student not identified"
+        rows.append({"Student ID": sid, "Name": name, "Batch": b, "Case": cid, "Problem": prob,
+                     "Details": str(r.get("Status") or "")[:300], "File": str(r.get("File") or "")[:200],
+                     "When": str(r.get("run_at") or "")[:16]})
+    df = pd.DataFrame(rows, columns=IMPROPER_COLS)
+    return df.sort_values(["Case", "Student ID"]).reset_index(drop=True)
+
+
+def missing_returns(studs, evs, batch=None, improper=None):
+    """Students with mock returns their batch has done but that were not received. Returns that came in
+    improperly (improper: an improper_submissions table) are not counted here - they are listed there."""
     done = done_by_batch(evs)
     got = {(e["student_id"], e["case_id"]) for e in evs}
+    if improper is not None and not improper.empty:
+        got |= {(r["Student ID"], r["Case"]) for _, r in improper.iterrows() if r["Student ID"]}
     rows = []
     for s in studs:
         if batch not in (None, ALL) and s["batch"] != batch:
@@ -148,12 +216,24 @@ def missing_returns(studs, evs, batch=None):
     return df.sort_values(["Missing", "Student ID"], ascending=[False, True]).reset_index(drop=True)
 
 
+def case_submissions(studs, evs, run_rows, case_id, batch=None):
+    """For one mock return: (not_received, improper). not_received = roster students (of the batch) with no
+    evaluation and no improper submission for it, whether or not their batch has started it."""
+    improper = improper_submissions(studs, evs, run_rows, batch, case_ids=[case_id])
+    got = {e["student_id"] for e in evs if e["case_id"] == case_id}
+    got |= set(improper["Student ID"])
+    nr = [{"Student ID": s["student_id"], "Name": s.get("name") or "", "Batch": s["batch"], "Case": case_id}
+          for s in studs if (batch in (None, ALL) or s["batch"] == batch) and s["student_id"] not in got]
+    return (pd.DataFrame(nr, columns=NOT_RECEIVED_COLS).sort_values(["Batch", "Student ID"]).reset_index(drop=True),
+            improper)
+
+
 def score_bands(scores_df):
-    """How many students fall in each band of the progress score (out of 100)."""
+    """How many students fall in each band of their share of the marks possible so far (%)."""
     bands = [("Below 50", 0, 50), ("50-59", 50, 60), ("60-69", 60, 70), ("70-79", 70, 80), ("80-89", 80, 90),
              ("90-100", 90, 100.01)]
     started = scores_df[scores_df["Result"] != "Not started"]
-    t = started["Total / 100"]
+    t = started["% of possible so far"] if "% of possible so far" in started else started["Total / 100"]
     return pd.DataFrame([{"Score band": n, "Students": int(((t >= lo) & (t < hi)).sum())} for n, lo, hi in bands])
 
 

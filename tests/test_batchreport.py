@@ -104,3 +104,51 @@ def test_integrity_for_one_batch():
     b2 = integrity_for(res, "B2")
     assert len(b2["pairs"]) == 1 and len(b2["trainer"]) == 1
     assert integrity_for(None, "B1")["students"].empty
+
+
+# ------------------------------------------------------------------ not received / improper submissions
+from batchreport import case_submissions, improper_submissions  # noqa: E402
+
+RUN_ROWS = [   # newest run first, as db.run_rows returns them
+    {"case_id": "M02", "run_at": "2026-11-20 10:00", "Student ID": "A2", "File": "A2_M02.pdf",
+     "Status": "Failed - page 1 of Form 1040 could not be read"},
+    {"case_id": "M02", "run_at": "2026-11-20 10:00", "Student ID": "C1", "File": "C1/",
+     "Status": "Skipped - student C1's folder has no PDF files: scan.jpg"},
+    {"case_id": "M02", "run_at": "2026-11-20 10:00", "Student ID": "", "File": "random.pdf",
+     "Status": "Skipped - no student ID in the name"},
+    {"case_id": "M01", "run_at": "2026-11-19 10:00", "Student ID": "A2", "File": "ben m1.pdf",
+     "Status": "Evaluated - CHECK NAME: matched by name"},
+    {"case_id": "M01", "run_at": "2026-11-18 10:00", "Student ID": "A1", "File": "A1_M01.pdf",
+     "Status": "Failed - unreadable"},                                         # evaluated later: put right
+    {"case_id": "M02", "run_at": "2026-11-18 10:00", "Student ID": "A2", "File": "old.pdf",
+     "Status": "Evaluated"},                                                   # older than the failure above
+    {"case_id": "M01", "run_at": "2026-11-18 10:00", "Student ID": "A2", "File": "x.pdf",
+     "Status": "Skipped - already evaluated"},
+]
+
+
+def test_improper_submissions_lists_failed_no_pdf_misnamed_and_unidentified():
+    studs, evs = data()
+    imp = improper_submissions(studs, evs, RUN_ROWS)
+    got = {(r["Student ID"], r["Case"], r["Problem"]) for _, r in imp.iterrows()}
+    assert got == {("A2", "M02", "Could not be evaluated"), ("C1", "M02", "No PDF / wrong file type"),
+                   ("", "M02", "Student not identified"), ("A2", "M01", "Named incorrectly (evaluated)")}
+    b1 = improper_submissions(studs, evs, RUN_ROWS, batch="B1")
+    assert set(b1["Student ID"]) == {"A2"}                                   # unidentified files only for all batches
+
+
+def test_case_submissions_splits_not_received_from_improper():
+    studs, evs = data()
+    nr, imp = case_submissions(studs, evs, RUN_ROWS, "M02")
+    assert list(nr["Student ID"]) == ["U1"]          # A1 evaluated; A2 and C1 submitted improperly
+    assert set(imp["Student ID"]) == {"A2", "C1", ""}
+    nr3, imp3 = case_submissions(studs, evs, RUN_ROWS, "M03", batch="B1")
+    assert list(nr3["Student ID"]) == ["A1", "A2"] and imp3.empty
+
+
+def test_missing_returns_leaves_out_improper_submissions():
+    studs, evs = data()
+    imp = improper_submissions(studs, evs, RUN_ROWS)
+    mr = missing_returns(studs, evs, "B1", improper=imp)
+    assert mr.empty                                   # A2's M02 is improper, not missing
+    assert list(missing_returns(studs, evs, "B1")["Student ID"]) == ["A2"]

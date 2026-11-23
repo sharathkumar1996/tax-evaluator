@@ -434,6 +434,26 @@ class DB:
         except ValueError:
             return {}
 
+    def run_rows(self, case_ids):
+        """Every per-student / per-file row recorded in the evaluation runs of these cases, newest run first,
+        each with 'case_id', 'run_at' and 'run_kind' added. Used to find improper submissions."""
+        import json
+        ids = [c for c in dict.fromkeys(case_ids or []) if c]
+        if not ids:
+            return []
+        marks = ", ".join("?" for _ in ids)
+        out = []
+        for r in self.rows(f"SELECT case_id, started_at, kind, detail FROM eval_runs WHERE case_id IN ({marks}) "
+                           "ORDER BY started_at DESC", tuple(ids)):
+            try:
+                d = json.loads(r["detail"] or "{}")
+            except ValueError:
+                continue
+            for x in d.get("rows") or []:
+                if isinstance(x, dict):
+                    out.append(dict(x, case_id=r["case_id"], run_at=r["started_at"], run_kind=r["kind"]))
+        return out
+
     def erase_runs(self, before=None):
         if before:
             self.run("DELETE FROM eval_runs WHERE started_at < ?", (before,))

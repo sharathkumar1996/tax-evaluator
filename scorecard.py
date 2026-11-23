@@ -72,7 +72,9 @@ def scorecard_pdf(row, returns, settings, institute, view=FINAL):
                          textColor=GREEN if good else RED)
     head = Table([[Paragraph(f"{total:g} <font size=12>/ 100</font>", big), Paragraph(result.upper(), res),
                    _p(f"Pass mark: {s['pass_mark']:g} / 100" + ("" if final else
-                      ". Progress so far: based only on the returns and tests your batch has done."), SMALL)]],
+                      f". Progress so far: {_num(row.get('Marks possible so far'))} marks were possible from the "
+                      f"returns and tests your batch has done; you earned {_num(row.get('% of possible so far'))}% "
+                      f"of them (on track = {s['pass_mark']:g}% or more)."), SMALL)]],
                  colWidths=[50 * mm, 35 * mm, W - 85 * mm])
     head.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), MAROON_LIGHT), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
                               ("LEFTPADDING", (0, 0), (-1, -1), 8), ("TOPPADDING", (0, 0), (-1, -1), 8),
@@ -81,14 +83,16 @@ def scorecard_pdf(row, returns, settings, institute, view=FINAL):
 
     story.append(Paragraph("How the score is made up", H2))
     acc_k, ont_k, mcq_k = (f"Accuracy / {s['w_accuracy']:g}", f"On-time / {s['w_on_time']:g}", f"MCQ / {s['w_mcq']:g}")
+    pa, po = s["w_accuracy"] / s["n_mocks"], s["w_on_time"] / s["n_mocks"]
+    pt = s["w_mcq"] / s["n_mcq"] if s["n_mcq"] else 0
     comp = [["Component", "How it is worked out", "Your marks", "Out of"],
-            ["Return accuracy", f"Average score of the mock returns ({row['Returns evaluated']} evaluated): "
-                                f"{_num(row['Average return score'])}%", _num(row[acc_k]), f"{s['w_accuracy']:g}"],
-            ["On-time submission", f"{row['On time']} returns on time, {row['Late']} late",
+            ["Return accuracy", f"{pa:.2f} marks per mock return x its score ({row['Returns evaluated']} "
+                                "evaluated)", _num(row[acc_k]), f"{s['w_accuracy']:g}"],
+            ["On-time submission", f"{po:.2f} marks per return on time: {row['On time']} on time, {row['Late']} late",
              _num(row[ont_k]), f"{s['w_on_time']:g}"],
-            ["MCQ tests", f"Marks {row['MCQ marks']}", _num(row[mcq_k]), f"{s['w_mcq']:g}"]]
-    if final:
-        comp.append(["Total", "", _num(total), "100"])
+            ["MCQ tests", f"{pt:.2f} marks per test x its marks: {row['MCQ marks']}", _num(row[mcq_k]),
+             f"{s['w_mcq']:g}"],
+            ["Total", "", _num(total), "100"]]
     story.append(_grid(comp, [34 * mm, W - 34 * mm - 44 * mm, 22 * mm, 22 * mm]))
 
     story.append(Paragraph("Mock returns", H2))
@@ -105,9 +109,10 @@ def scorecard_pdf(row, returns, settings, institute, view=FINAL):
                                 for t in range(1, int(s["n_mcq"]) + 1)]
     story.append(_grid(mq, [40 * mm, 40 * mm]))
     story += [Spacer(1, 8), _p(
-        f"Scoring: return accuracy {s['w_accuracy']:g} marks (all {s['n_mocks']:g} mock returns, a return not "
-        f"submitted counts 0), on-time submission {s['w_on_time']:g} marks (a late return earns no on-time marks), "
-        f"MCQ tests {s['w_mcq']:g} marks ({s['n_mcq']:g} tests of {s['mcq_out_of']:g} marks). "
+        f"Scoring: return accuracy {s['w_accuracy']:g} marks ({pa:.2f} per mock return, in proportion to its score; "
+        f"a return not submitted earns 0), on-time submission {s['w_on_time']:g} marks ({po:.2f} per return on "
+        f"time; a late return earns none), MCQ tests {s['w_mcq']:g} marks ({pt:.2f} per test of "
+        f"{s['mcq_out_of']:g} marks). "
         f"Pass mark {s['pass_mark']:g}.", SMALL)]
 
     def footer(canvas, d):
