@@ -85,8 +85,8 @@ def find_date(*texts, year=None):
 def _find_header(df, must=("email", "name")):
     """Row index whose cells contain all the words in must (for sheets with a title above the header)."""
     for i in range(min(len(df), 15)):
-        cells = " ".join(_norm(c) for c in df.iloc[i].tolist())
-        if all(w in cells for w in must):
+        cells = [_norm(c) for c in df.iloc[i].tolist() if _norm(c) and _norm(c) != "nan"]
+        if len(cells) >= 3 and all(any(w in c for c in cells) for w in must):    # a real header row, not a note
             return i
     return None
 
@@ -176,6 +176,42 @@ def read_report(file_bytes, file_name="", session_date=None):
         raise AttendanceError("No attendance rows found. Expected the '80% Attendance' and 'Below 80%' sheets of "
                               "the daily report, or a sheet with a Status / Present column.")
     return d, rows
+
+
+def read_reports(file_bytes, file_name=""):
+    """Like read_report, for a file that may hold several class dates: a compiled sheet with a 'Date' column
+    (one row per learner per date) gives one (date, rows) per date. Any other file gives [read_report(...)]."""
+    import io
+    if not str(file_name).lower().endswith(".csv"):
+        try:
+            sheets = pd.read_excel(io.BytesIO(file_bytes), sheet_name=None, header=None, dtype=object)
+        except Exception:
+            sheets = {}
+        for raw in sheets.values():
+            h = _find_header(raw, ("date", "status"))
+            if h is None:
+                continue
+            t = _table(raw, ("date", "status"))
+            cd = _col(t, "Date", "Session Date", "Class Date")
+            if cd is None:
+                continue
+            out = {}
+            for _, r in t.iterrows():
+                v = r[cd]
+                d = v.date() if hasattr(v, "date") and not isinstance(v, str) else find_date(str(v))
+                if d is None:
+                    continue
+                out.setdefault(d, []).append(r)
+            if not out:
+                continue
+            res = []
+            for d, rs in sorted(out.items()):
+                sub = pd.DataFrame(rs, columns=t.columns)
+                buf = io.BytesIO()
+                sub.drop(columns=[cd]).to_excel(buf, index=False)
+                res.append(read_report(buf.getvalue(), "x.xlsx", session_date=d))
+            return res
+    return [read_report(file_bytes, file_name)]
 
 
 def _sid(v):

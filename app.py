@@ -563,7 +563,7 @@ with t_att:
 
         from attendance import (ABSENT, BELOW, FLAG_ALL, FLAG_IMPROPER, FLAG_LOW_ATT, FLAG_LOW_PERF, FLAG_MCQ,
                                 FLAG_MOCK, FLAGS, PRESENT, AttendanceError, alias_key, batch_overview,
-                                class_summary, deloitte_workbook, flag_list, match_rows, read_report,
+                                class_summary, deloitte_workbook, flag_list, match_rows, read_reports,
                                 session_records, tracker)
         from batchreport import improper_submissions, prepare
         from roster_flag import ROW_CSS, panel_html
@@ -605,17 +605,28 @@ with t_att:
                                      key=f"att_files{ss.get('att_n', 0)}")
             done_dates = {r["session_date"]: r for r in db.attendance_dates()}
             id_opts = [""] + [f"{x['student_id']} - {x['name'] or ''} ({x['batch'] or ''})" for x in roster_all]
+            parsed = []
             for f in files or []:
-                with st.expander(f"{f.name}", expanded=True):
-                    try:
-                        d0, rows = read_report(f.getvalue(), f.name)
-                    except AttendanceError as e:
-                        st.error(str(e))
-                        continue
-                    except Exception:
-                        log.exception("reading attendance failed")
-                        st.error("This file could not be read. Check it is the daily attendance report.")
-                        continue
+                try:
+                    for d0, rows in read_reports(f.getvalue(), f.name):
+                        parsed.append((f"{f.name} | {d0:%d %b %Y}", d0, rows))
+                except AttendanceError as e:
+                    st.error(f"{f.name}: {e}")
+                except Exception:
+                    log.exception("reading attendance failed")
+                    st.error(f"{f.name} could not be read. Check it is an attendance report.")
+            if len(parsed) > 1:
+                st.info(f"{len(parsed)} class dates found. Check each below, then save them one by one or all at "
+                        "once.")
+                if st.button(f"Save all {len(parsed)} dates", type="primary", key="att_save_all"):
+                    n_all = 0
+                    for _, d0, rows in parsed:
+                        recs_, _ = session_records(d0.isoformat(), match_rows(rows, roster_all, aliases), roster_all)
+                        n_all += db.save_attendance(d0.isoformat(), recs_, staff or "")
+                    st.success(f"Saved {n_all} attendance records for {len(parsed)} class dates.")
+            for label, d0, rows in parsed:
+                f = type("F", (), {"name": label})
+                with st.expander(label, expanded=len(parsed) == 1):
                     d = st.date_input("Class date", value=d0, key=f"att_d_{f.name}")
                     ds = d.isoformat()
                     matched = match_rows(rows, roster_all, aliases)

@@ -127,3 +127,22 @@ def test_deloitte_workbook_has_a_sheet_per_concern_and_shades_improper_submissio
     assert "Simandhar" in ws["A1"].value and ws["A4"].value == "Student ID"
     shaded = {row[0].value for row in ws.iter_rows(min_row=5) if row[0].fill.fgColor.rgb.endswith("F7ECEF")}
     assert shaded == {"164002"}
+
+
+def test_a_compiled_sheet_with_a_date_column_gives_one_class_per_date():
+    from attendance import read_reports
+    notes = pd.DataFrame({"Notes": ["Upload the Attendance sheet (Date, Batch, Student ID, Name, Email, Status)"]})
+    att = pd.DataFrame({"Date": ["2026-11-12", "2026-11-12", "2026-11-16"], "Batch": ["Batch 1"] * 3,
+                        "Student ID": ["", "", ""], "Name": ["Ravi Kumar", "Asha K S", "Ravi Kumar"],
+                        "Email": ["ravim.ext@deloitte.com", "", "ravim.ext@deloitte.com"],
+                        "Status": [PRESENT, ABSENT, BELOW], "% of Session": [97.0, None, 40.0]})
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as xw:
+        notes.to_excel(xw, "Notes", index=False)                      # a note mentioning the headers is skipped
+        att.to_excel(xw, "Attendance", index=False)
+    res = read_reports(buf.getvalue(), "compiled.xlsx")
+    assert [(d, [r["status"] for r in rows]) for d, rows in res] == [
+        (date(2026, 11, 12), [PRESENT, ABSENT]), (date(2026, 11, 16), [BELOW])]
+    recs, _ = session_records(res[0][0], match_rows(res[0][1], ROSTER), ROSTER)
+    assert {r["student_id"]: r["status"] for r in recs if r["batch"] == "Batch-1"}["164001"] == PRESENT
+    assert len(read_reports(REPORT, "daily.xlsx")) == 1                # the daily report still works
