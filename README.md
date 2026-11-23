@@ -44,6 +44,13 @@ mock per batch; batch detail (students, mocks, returns not received, common mist
 Simandhar-branded PDF + Excel per batch for its trainer (`batchreport.py`, `batch_pdf.py`), one at a time or all as
 a zip; and the batch → trainer list (stored in settings as `batch_trainers`).
 
+## Run history
+
+*Find a report / history → Run history*: every single and bulk evaluation run is recorded (table `eval_runs`):
+the files uploaded, the run's options, and for each file or student whether it was evaluated, skipped or failed and
+why. Filter by case, period and type; download one run or the whole period as Excel. Student PDF reports are not
+stored. Erasing a student removes their rows from the history; admins can delete runs older than 90 days / 1 year.
+
 ## Final course score
 
 Management dashboard → *Final results*: return accuracy 60 (average of the 12 mock returns, missing = 0) +

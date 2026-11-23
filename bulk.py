@@ -62,6 +62,24 @@ class BulkError(Exception):
     pass
 
 
+def read_code(tok, current=None):
+    """A mock code as the course writes it, or None. With the current case known ('M01'), typing slips
+    don't matter: 'm01', 'M1', 'M-01', 'MO1' / 'mO1' (letter O), 'M0l' / 'MI1' (l or I for 1), 'Mock1',
+    'Mock 01' all read as M01 - and 'MO2' as M02. A code with other letters ('B1', 'Batch-1') is not a
+    mock code. Without a current case, only a plain code like 'C03' is read."""
+    t = re.sub(r"[\s_#]", "", str(tok or "").upper())
+    cur = re.fullmatch(r"([A-Z]*)-?(\d+)", (current or "").upper())
+    if not cur:
+        return t if CASE_LIKE.match(t) else None
+    letters, width = cur.group(1), len(cur.group(2))
+    m = re.fullmatch(r"MOCK-?([0-9OIL]{1,3})", t)
+    rest = m.group(1) if m else (t[len(letters):].lstrip("-") if letters and t.startswith(letters) else None)
+    if rest is None or not re.fullmatch(r"[0-9OIL]{1,3}", rest) or not re.search(r"\d", rest):
+        return None
+    n = int(rest.translate(str.maketrans("OIL", "011")))
+    return f"{letters}{n:0{width}d}"
+
+
 def same_case(a, b):
     """'M1' == 'M01' == 'm-01'; 'C03' == 'C3'."""
     def norm(x):
@@ -137,13 +155,13 @@ def _words(text):
 
 def _case_in(text, case_id):
     """A mock code in a name: 'M01', 'm-1' or 'mock 1' (read with the current case's letters)."""
-    for t in re.findall(r"[A-Za-z]+-?\d+", text):
-        if CASE_LIKE.match(t.upper()):
-            return t.upper()
-    m = re.search(r"mock\s*[-_#]?\s*0*(\d{1,3})", text, re.I)
-    if m:
-        letters = re.match(r"[A-Z]*", case_id or "").group(0) or "M"
-        return f"{letters}{int(m.group(1)):02d}"
+    m = re.search(r"mock\s*[-_#]?\s*([0-9OIL]{1,3})\b", text, re.I)
+    if m and read_code("MOCK" + m.group(1), case_id):
+        return read_code("MOCK" + m.group(1), case_id)
+    for t in re.findall(r"[A-Za-z]+-?[0-9OIL]+|[A-Za-z0-9]+", text):
+        c = read_code(t, case_id)
+        if c:
+            return c
     return None
 
 
@@ -197,10 +215,16 @@ class _Namer:
             return None
         sid, case = m.group(1).upper(), m.group(2).upper()
         if self.case:
-            if not CASE_LIKE.match(case) and CASE_LIKE.match(sid) and same_case(sid, self.case):
+            code, scode = read_code(case, self.case), read_code(sid, self.case)
+            if code is None and scode and same_case(scode, self.case):
                 return case, self.case, f"name '{text}' has the mock code first"           # M01_164234
-            if not CASE_LIKE.match(case):
-                return None                                                             # e.g. Batch_1
+            if code is None:
+                return None                                                             # e.g. 164234_Batch1
+            if code != case:
+                slip = f"name '{text}' has mock code {case}, read as {code}"
+            else:
+                slip = None
+            case = code
             id_warn = None
             if self.roster and sid not in self.roster and not CASE_LIKE.match(sid):
                 found = self._ids(text)
@@ -212,10 +236,10 @@ class _Namer:
                     if r:
                         return r
         else:
-            id_warn = None
+            id_warn = slip = None
         fixed = self._fix_case(case)
         warn = f"name '{text}' has mock code {case}, read as {fixed}" if fixed != case else None
-        return sid, fixed, id_warn or warn
+        return sid, fixed, id_warn or warn or slip
 
     def _ids(self, text):
         toks = [t.upper() for t in re.findall(r"[A-Za-z0-9]+", text)]
@@ -235,7 +259,11 @@ class _Namer:
         if len(ids) != 1:
             return None
         toks = re.findall(r"[A-Za-z]+-?\d+|[A-Za-z0-9]+", stem)
-        cases = [t.upper() for t in toks if CASE_LIKE.match(t.upper()) and t.upper() != ids[0]]
+        cases = [read_code(t, self.case) for t in toks if t.upper() != ids[0]]
+        cases = [c for c in cases if c]
+        mm = re.search(r"mock\s*[-_#]?\s*([0-9OIL]{1,3})\b", stem, re.I)
+        if mm and read_code("MOCK" + mm.group(1), self.case):
+            cases.append(read_code("MOCK" + mm.group(1), self.case))
         mine = [c for c in cases if same_case(c, self.case)]
         if mine:
             return ids[0], self.case, f"name '{text}' does not follow StudentID_{self.case} - matched to this student"

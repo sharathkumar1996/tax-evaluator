@@ -135,3 +135,24 @@ def test_mcq_scores_settings_and_final_cases(db):
     assert db.final_cases() == ["C03"]
     db.erase_all()
     assert db.mcq_scores() == [] and db.final_cases() == []
+
+
+def test_run_history_is_kept_listed_and_scrubbed(db):
+    db.upsert_students([("S1", "Asha", "B1"), ("S2", "Ben", "B1")])
+    run = {"run_id": "r1", "started_at": "2026-11-23 10:00:00", "finished_at": "2026-11-23 10:01:00", "kind": "Bulk",
+           "case_id": "C03", "run_by": "staff", "files": 3, "evaluated": 2, "skipped": 1, "failed": 0, "warnings": 1,
+           "detail": {"rows": [{"Student ID": "S1", "Status": "Evaluated"}, {"Student ID": "S2", "Status": "Evaluated"},
+                               {"Student ID": "", "File": "x.pdf", "Status": "Skipped - no student ID"}],
+                      "uploads": [["batch.zip", 1234]]}}
+    db.save_run(run)
+    db.save_run(dict(run, run_id="r2", started_at="2026-11-20 09:00:00", case_id="C04", detail={}))
+    assert [r["run_id"] for r in db.runs()] == ["r1", "r2"]
+    assert [r["run_id"] for r in db.runs(case_id="C03")] == ["r1"]
+    assert [r["run_id"] for r in db.runs(since="2026-11-21")] == ["r1"]
+    assert db.run_detail("r1")["uploads"] == [["batch.zip", 1234]]
+    db.erase_student("S1")                                         # the student's rows leave the history too
+    assert [x["Student ID"] for x in db.run_detail("r1")["rows"]] == ["S2", ""]
+    db.erase_runs(before="2026-11-21")
+    assert [r["run_id"] for r in db.runs()] == ["r1"]
+    db.erase_all()
+    assert db.runs() == []

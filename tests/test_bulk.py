@@ -153,3 +153,26 @@ def test_unknown_name_is_skipped_and_another_mock_is_kept_apart():
 def test_proper_names_still_win_and_carry_no_warning():
     groups, _ = _grp(["B1/164746_M01/f1040.pdf"])
     assert groups[0].student_id == "164746" and groups[0].warnings == []
+
+
+@pytest.mark.parametrize("code,want", [("M01", "M01"), ("m01", "M01"), ("M1", "M01"), ("M-01", "M01"), ("MO1", "M01"),
+                                       ("mO1", "M01"), ("M0l", "M01"), ("MI1", "M11"), ("Mock1", "M01"),
+                                       ("MOCK 01", "M01"), ("MO2", "M02"), ("M12", "M12"), ("B1", None),
+                                       ("Batch-1", None), ("MOL", None), ("164746", None)])
+def test_mock_code_typing_slips_do_not_matter(code, want):
+    from bulk import read_code
+    assert read_code(code, "M01") == want
+
+
+@pytest.mark.parametrize("path", ["164746_mO1/f.pdf", "164746_MO1/f.pdf", "164746_MO1 Batch-1/f.pdf",
+                                  "164746 MO1 Batch-2/f.pdf", "164746-m01-batch 3/f.pdf", "164746_Mock 01 Batch-4/f.pdf",
+                                  "163316_m0l/f.pdf".replace("163316", "164746"), "MO1_164746/f.pdf",
+                                  "Batch-3/MO1/164746/f.pdf", "164746_B2/f.pdf", "Ravi Kumar MO1 Batch-2/f.pdf"])
+def test_folder_with_identifiable_student_is_accepted_whatever_the_mock_code_spelling(path):
+    groups, skipped = _grp([path])
+    assert skipped == [] and [(g.student_id, g.case_id) for g in groups] == [("164746", "M01")]
+
+
+def test_a_different_mock_is_still_kept_apart():
+    groups, _ = _grp(["164746_MO2/f.pdf", "164746_Mock 2/f.pdf"])
+    assert {g.case_id for g in groups} == {"M02"}

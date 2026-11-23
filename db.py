@@ -127,6 +127,21 @@ MIGRATIONS = [
          """CREATE TABLE IF NOT EXISTS settings (
             name TEXT PRIMARY KEY,
             value TEXT)"""]),
+    # history of evaluation runs: what was uploaded, what was evaluated, skipped or failed and why
+    (5, ["""CREATE TABLE IF NOT EXISTS eval_runs (
+            run_id TEXT PRIMARY KEY,
+            started_at TEXT,
+            finished_at TEXT,
+            kind TEXT,
+            case_id TEXT,
+            run_by TEXT,
+            files INTEGER,
+            evaluated INTEGER,
+            skipped INTEGER,
+            failed INTEGER,
+            warnings INTEGER,
+            detail TEXT)""",
+         "CREATE INDEX IF NOT EXISTS ix_runs_case ON eval_runs (case_id, started_at)"]),
 ]
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 TRANSIENT = ("OperationalError", "InterfaceError", "PoolTimeout", "ConnectionTimeout")
@@ -381,6 +396,68 @@ class DB:
                 self._write_fingerprints(c, sid, case_id, fingerprints)
         self.tx(write)
 
+    # ------------------------------------------------------------ evaluation run history
+    RUN_COLS = "run_id, started_at, finished_at, kind, case_id, run_by, files, evaluated, skipped, failed, warnings"
+    MAX_RUN_DETAIL = 3_000_000                  # characters of JSON kept per run
+
+    def save_run(self, run):
+        """run: dict with the RUN_COLS fields and 'detail' (a JSON-able dict). Long details are trimmed."""
+        import json
+        detail = json.dumps(run.get("detail") or {}, default=str)
+        if len(detail) > self.MAX_RUN_DETAIL:
+            d = dict(run.get("detail") or {})
+            for k in ("rows", "skipped"):
+                if isinstance(d.get(k), list):
+                    d[k] = d[k][:2000]
+            d["trimmed"] = True
+            detail = json.dumps(d, default=str)[:self.MAX_RUN_DETAIL]
+        self.run(f"INSERT INTO eval_runs ({self.RUN_COLS}, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 (run["run_id"], run["started_at"], run["finished_at"], run["kind"], run.get("case_id") or "",
+                  (run.get("run_by") or "")[:100], int(run.get("files") or 0), int(run.get("evaluated") or 0),
+                  int(run.get("skipped") or 0), int(run.get("failed") or 0), int(run.get("warnings") or 0), detail))
+
+    def runs(self, case_id=None, since=None, limit=1000):
+        sql, p = f"SELECT {self.RUN_COLS} FROM eval_runs WHERE 1 = 1", []
+        if case_id:
+            sql += " AND case_id = ?"
+            p.append(case_id)
+        if since:
+            sql += " AND started_at >= ?"
+            p.append(since)
+        return self.rows(sql + f" ORDER BY started_at DESC LIMIT {int(limit)}", tuple(p))
+
+    def run_detail(self, run_id):
+        import json
+        r = self.rows("SELECT detail FROM eval_runs WHERE run_id = ?", (run_id,))
+        try:
+            return json.loads(r[0]["detail"]) if r else None
+        except ValueError:
+            return {}
+
+    def erase_runs(self, before=None):
+        if before:
+            self.run("DELETE FROM eval_runs WHERE started_at < ?", (before,))
+        else:
+            self.run("DELETE FROM eval_runs")
+
+    def _scrub_runs(self, c, ids):
+        """Remove the given students' rows from stored run details (when their data is erased)."""
+        import json
+        ids = {str(i).upper() for i in ids}
+        if not ids:
+            return
+        for r in c.fetch("SELECT run_id, detail FROM eval_runs"):
+            try:
+                d = json.loads(r["detail"] or "{}")
+            except ValueError:
+                continue
+            rows = d.get("rows") or []
+            keep = [x for x in rows if str(x.get("Student ID") or "").upper() not in ids]
+            if len(keep) != len(rows):
+                d["rows"] = keep
+                c.execute("UPDATE eval_runs SET detail = ? WHERE run_id = ?", (json.dumps(d, default=str),
+                                                                                r["run_id"]))
+
     # ------------------------------------------------------------ on-time submission
     @staticmethod
     def _status(v):
@@ -535,6 +612,7 @@ class DB:
             c.execute("DELETE FROM mistakes WHERE case_id = ?", (case_id,))
             c.execute("DELETE FROM submission_log WHERE case_id = ?", (case_id,))
             c.execute("DELETE FROM evaluations WHERE case_id = ?", (case_id,))
+            c.execute("DELETE FROM eval_runs WHERE case_id = ?", (case_id,))
             c.execute("DELETE FROM cases WHERE case_id = ?", (case_id,))
         self.tx(f)
 
@@ -547,6 +625,7 @@ class DB:
             c.execute("DELETE FROM mcq_scores WHERE student_id = ?", (sid,))
             c.execute("DELETE FROM evaluations WHERE student_id = ?", (sid,))
             c.execute("DELETE FROM students WHERE student_id = ?", (sid,))
+            self._scrub_runs(c, [sid])
         self.tx(f)
 
     def erase_batch(self, batch, roster_too=True):
@@ -554,6 +633,7 @@ class DB:
         sub = "SELECT student_id FROM students WHERE batch = ?"
 
         def f(c):
+            self._scrub_runs(c, [r["student_id"] for r in c.fetch(sub, (batch,))])
             c.execute(f"DELETE FROM mistakes WHERE student_id IN ({sub})", (batch,))
             c.execute(f"DELETE FROM fingerprints WHERE student_id IN ({sub})", (batch,))
             c.execute(f"DELETE FROM submission_log WHERE student_id IN ({sub})", (batch,))
@@ -577,7 +657,8 @@ class DB:
 
     def erase_all(self):
         def f(c):
-            for t in ("mistakes", "fingerprints", "submission_log", "mcq_scores", "evaluations", "students", "cases"):
+            for t in ("mistakes", "fingerprints", "submission_log", "mcq_scores", "evaluations", "students", "cases",
+                      "eval_runs"):
                 c.execute(f"DELETE FROM {t}")
         self.tx(f)
 

@@ -10,10 +10,11 @@ Tax Return Evaluator - Streamlit app.
 import hashlib
 import hmac
 import io
+import os
 import logging
 import re
 import zipfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -180,7 +181,7 @@ with st.sidebar:
 st.title("Tax Return Evaluator")
 t_eval, t_students, t_mgmt, t_batch, t_integ, t_find, t_build, t_data, t_help = st.tabs(
     ["Evaluate returns", "Students & batches", "Management dashboard", "Batch reports", "Integrity checks",
-     "Find a report",
+     "Find a report / history",
      "Build a key from a correct return", "Data management", "How it works"])
 
 
@@ -211,6 +212,27 @@ def save(sid, res, on_time=None):
 
 
 SUBMITTED = ["On time", "Late"]
+
+
+def record_run(kind, case_id, started, uploads, rows, options=None):
+    """Keep a record of an evaluation run (everything except the student PDF reports): what was uploaded and,
+    for every file / student, whether it was evaluated, skipped or failed and why."""
+    if not db:
+        return
+    try:
+        st_ = [str(r.get("Status") or "") for r in rows]
+        clean_rows = [{k_: (None if isinstance(v, float) and pd.isna(v) else v) for k_, v in r.items()} for r in rows]
+        db.save_run({"run_id": started.strftime("%Y%m%d%H%M%S") + "-" + os.urandom(3).hex(),
+                     "started_at": started.strftime("%Y-%m-%d %H:%M:%S"),
+                     "finished_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                     "kind": kind, "case_id": case_id, "run_by": staff or "", "files": len(uploads),
+                     "evaluated": sum(x.startswith("Evaluated") for x in st_),
+                     "skipped": sum(x.startswith("Skipped") for x in st_),
+                     "failed": sum(x.startswith("Failed") for x in st_),
+                     "warnings": sum(("CHECK" in x) or ("check" in x) for x in st_),
+                     "detail": {"uploads": uploads, "rows": clean_rows, "options": options or {}}})
+    except Exception:
+        log.exception("could not record the evaluation run")
 
 
 def show_result(r):
@@ -297,13 +319,20 @@ with t_eval:
             if st.button("Evaluate", type="primary", disabled=not pdfs or not sid):
                 with st.spinner("Reading the return and marking it..."):
                     files = [(f.name, f.getvalue()) for f in pdfs]
+                    started = datetime.now(timezone.utc)
+                    one_row = {"File": ", ".join(n for n, _ in files)[:300], "Student ID": sid, "Name": sname or "",
+                               "Submission": sub_one}
+                    one_up = [(n, len(d)) for n, d in files]
                     try:
                         res = evaluate_files(files, sid, sname, k)
                     except ReaderError as e:
+                        record_run("Single", k.case_id, started, one_up, [dict(one_row, Status=f"Failed - {e}")])
                         st.error(str(e))
                         st.stop()
-                    except Exception:
+                    except Exception as e:
                         log.exception("evaluation failed for %s", sid)
+                        record_run("Single", k.case_id, started, one_up, [dict(
+                            one_row, Status=f"Failed - unexpected error ({type(e).__name__}); details logged")])
                         st.error("Something went wrong while reading this return. The details were logged; "
                                  "please check the files and try again.")
                         st.stop()
@@ -321,6 +350,14 @@ with t_eval:
                            "Evaluated": datetime.now().strftime("%d-%b %H:%M"), **res}
                     ss.results.append(rec)
                     ss.results = ss.results[-200:]          # keep the session's memory bounded
+                    m1 = res["m"]
+                    record_run("Single", k.case_id, started, one_up, [dict(
+                        one_row, **{"Score": m1["score"], "Out of": m1["out_of"],
+                                    "Score /100": round(m1["pct"] * 100, 1), "Errors": m1["errors"],
+                                    "Status": ("Evaluated" if saved else "Failed - marked but NOT saved")
+                                    + (" - check 'What the system read'" if m1["needs_review"] or res["notes"]
+                                       or res["unlinked"] else ""),
+                                    "Notes": " | ".join(res["notes"])[:300]})])
                     ss.last = rec
                 if db and saved:
                     st.toast("Saved to the database", icon="✅")
@@ -364,6 +401,7 @@ with t_eval:
                                     key=f"bulk_exc{ss.uploader_n}")
             exceptions = {x.strip().upper() for x in re.split(r"[,;\s]+", exc_txt or "") if x.strip()}
             if st.button("Evaluate all", type="primary", disabled=not files):
+                started = datetime.now(timezone.utc)
                 roster = {s_["student_id"]: s_ for s_ in db.students()} if db else {}
                 groups, skipped = group_uploads([(f.name, f.getvalue()) for f in files], case_id=k.case_id,
                                                 roster_ids={i: (r_.get("name") or "") for i, r_ in roster.items()}
@@ -413,6 +451,9 @@ with t_eval:
                                 row["Status"] = f"Failed - unexpected error ({type(e).__name__}); details logged"
                         out.append(row)
                 bar.progress(1.0, text="Finished")
+                record_run("Bulk", k.case_id, started, [(f.name, f.size) for f in files], out,
+                           {"Batch submitted": bulk_sub, "Exceptions": ", ".join(sorted(exceptions)),
+                            "Skip already evaluated": skip_done, "PDF reports made": make_reports})
                 ss.bulk_out = {"case": k.case_id, "table": pd.DataFrame(out),
                                "zip": zbuf.getvalue() if make_reports else None,
                                "when": datetime.now().strftime("%Y%m%d_%H%M")}
@@ -1037,40 +1078,144 @@ with t_find:
     if not db:
         st.info("Saved reports need the database.")
     else:
-        sid_q = st.text_input("Student ID").strip().upper()
-        if sid_q:
-            evs = db.evaluations(student_id=sid_q)
-            if not evs:
-                st.warning("No saved evaluations for this student ID.")
+        f_rep, f_hist = st.tabs(["Student reports", "Run history"])
+        with f_rep:
+            sid_q = st.text_input("Student ID").strip().upper()
+            if sid_q:
+                evs = db.evaluations(student_id=sid_q)
+                if not evs:
+                    st.warning("No saved evaluations for this student ID.")
+                else:
+                    st.dataframe(pd.DataFrame([{"Case": e["case_id"], "Score": f"{e['score']:g} / {e['out_of']:g}",
+                                                "%": round(e["pct"] * 100, 1),
+                                                "Errors": e["errors"], "File": e["file_name"],
+                                                "Evaluated (UTC)": e["evaluated_at"], "By": e["evaluated_by"]} for e in evs]),
+                                 hide_index=True)
+                    case_q = st.selectbox("Case", [e["case_id"] for e in evs])
+                    e = next(x for x in evs if x["case_id"] == case_q)
+                    kb = db.case_key_bytes(case_q)
+                    if st.button("Prepare report"):
+                        key_q = parse_key(kb)
+                        rows = rebuild_rows(key_q, db.mistakes(sid=sid_q, case_id=case_q))
+                        cats, total, out_of = summarise(rows)
+                        ss.found = (sid_q, case_q, build_report(e.get("name") or "", sid_q, key_q, rows, cats, total, out_of,
+                                                                e["file_name"], institute,
+                                                                evaluated_on=f"{e['evaluated_at']} UTC"))
+                        if hashlib.sha256(kb).hexdigest()[:16] != e["key_hash"]:
+                            st.warning("The answer key for this case was changed after this return was marked. The report "
+                                       "uses the current key with the mistakes recorded at the time; re-evaluate the return "
+                                       "for an exact report.")
+                    if ss.get("found") and ss.found[:2] == (sid_q, case_q):
+                        st.download_button("Download report (PDF)", ss.found[2], file_name=report_name(sid_q, case_q),
+                                           mime="application/pdf")
+                    with st.expander("Delete this evaluation"):
+                        if st.checkbox(f"Yes, delete {sid_q} / {case_q} permanently"):
+                            if st.button("Delete"):
+                                db.delete_evaluation(sid_q, case_q)
+                                st.success("Deleted.")
+                                st.rerun()
+
+        # ---------------------------------------------------------- run history
+        with f_hist:
+            st.write("A record of every evaluation run - what was uploaded, and for every file or student whether "
+                     "it was evaluated, skipped or failed, and why. The students' PDF reports are not kept here "
+                     "(find those under *Student reports*).")
+            h1, h2, h3 = st.columns(3)
+            h_case = h1.selectbox("Case", ["All cases"] + [c["case_id"] for c in db.cases()], key="rh_case")
+            h_days = h2.selectbox("Period", ["Last 7 days", "Last 30 days", "Last 90 days", "Everything"],
+                                  key="rh_days")
+            h_kind = h3.multiselect("Type", ["Bulk", "Single"], default=["Bulk", "Single"], key="rh_kind")
+            days = {"Last 7 days": 7, "Last 30 days": 30, "Last 90 days": 90}.get(h_days)
+            since = ((datetime.now(timezone.utc) - pd.Timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+                     if days else None)
+            runs_ = [r for r in db.runs(case_id=None if h_case == "All cases" else h_case, since=since)
+                     if r["kind"] in h_kind]
+            if not runs_:
+                st.info("No evaluation runs in this period.")
             else:
-                st.dataframe(pd.DataFrame([{"Case": e["case_id"], "Score": f"{e['score']:g} / {e['out_of']:g}",
-                                            "%": round(e["pct"] * 100, 1),
-                                            "Errors": e["errors"], "File": e["file_name"],
-                                            "Evaluated (UTC)": e["evaluated_at"], "By": e["evaluated_by"]} for e in evs]),
-                             hide_index=True)
-                case_q = st.selectbox("Case", [e["case_id"] for e in evs])
-                e = next(x for x in evs if x["case_id"] == case_q)
-                kb = db.case_key_bytes(case_q)
-                if st.button("Prepare report"):
-                    key_q = parse_key(kb)
-                    rows = rebuild_rows(key_q, db.mistakes(sid=sid_q, case_id=case_q))
-                    cats, total, out_of = summarise(rows)
-                    ss.found = (sid_q, case_q, build_report(e.get("name") or "", sid_q, key_q, rows, cats, total, out_of,
-                                                            e["file_name"], institute,
-                                                            evaluated_on=f"{e['evaluated_at']} UTC"))
-                    if hashlib.sha256(kb).hexdigest()[:16] != e["key_hash"]:
-                        st.warning("The answer key for this case was changed after this return was marked. The report "
-                                   "uses the current key with the mistakes recorded at the time; re-evaluate the return "
-                                   "for an exact report.")
-                if ss.get("found") and ss.found[:2] == (sid_q, case_q):
-                    st.download_button("Download report (PDF)", ss.found[2], file_name=report_name(sid_q, case_q),
-                                       mime="application/pdf")
-                with st.expander("Delete this evaluation"):
-                    if st.checkbox(f"Yes, delete {sid_q} / {case_q} permanently"):
-                        if st.button("Delete"):
-                            db.delete_evaluation(sid_q, case_q)
-                            st.success("Deleted.")
-                            st.rerun()
+                rdf = pd.DataFrame(runs_)
+                tot = rdf[["evaluated", "skipped", "failed", "warnings"]].sum()
+                c = st.columns(4)
+                c[0].metric("Runs", len(rdf))
+                c[1].metric("Evaluated", int(tot["evaluated"]))
+                c[2].metric("Skipped", int(tot["skipped"]))
+                c[3].metric("Failed", int(tot["failed"]))
+                show = rdf.rename(columns={"started_at": "Started (UTC)", "kind": "Type", "case_id": "Case",
+                                           "run_by": "By", "files": "Files uploaded", "evaluated": "Evaluated",
+                                           "skipped": "Skipped", "failed": "Failed", "warnings": "To check"})
+                st.dataframe(show[["Started (UTC)", "Type", "Case", "By", "Files uploaded", "Evaluated", "Skipped",
+                                   "Failed", "To check"]], hide_index=True, use_container_width=True)
+
+                def run_frames(run_ids):
+                    out_rows, out_up = [], []
+                    for rid in run_ids:
+                        meta = next(r for r in runs_ if r["run_id"] == rid)
+                        d = db.run_detail(rid) or {}
+                        tag = {"Run started (UTC)": meta["started_at"], "Type": meta["kind"], "Case": meta["case_id"],
+                               "By": meta["run_by"]}
+                        out_rows += [dict(tag, **r) for r in d.get("rows") or []]
+                        out_up += [dict(tag, File=u[0], Bytes=u[1]) for u in d.get("uploads") or []]
+                        if d.get("options"):
+                            out_up.append(dict(tag, File="(options) " + "; ".join(f"{k_}: {v}" for k_, v in
+                                                                                   d["options"].items()), Bytes=None))
+                    return pd.DataFrame(out_rows), pd.DataFrame(out_up)
+
+                def run_workbook(run_ids):
+                    rows_df, up_df = run_frames(run_ids)
+                    meta = pd.DataFrame([r for r in runs_ if r["run_id"] in run_ids]).drop(columns=["run_id"])
+                    buf_ = io.BytesIO()
+                    with pd.ExcelWriter(buf_, engine="openpyxl") as xw:
+                        meta.to_excel(xw, sheet_name="Runs", index=False)
+                        for nm, df_ in (("Results", rows_df), ("Skipped", rows_df[rows_df["Status"].astype(str)
+                                                                                 .str.startswith("Skipped")]
+                                         if not rows_df.empty else rows_df),
+                                        ("Failed", rows_df[rows_df["Status"].astype(str).str.startswith("Failed")]
+                                         if not rows_df.empty else rows_df),
+                                        ("Uploaded files", up_df)):
+                            (df_ if not df_.empty else pd.DataFrame({"": ["None"]})).to_excel(
+                                xw, sheet_name=nm, index=False)
+                        for ws in xw.book.worksheets:
+                            ws.freeze_panes = "A2"
+                            for col in ws.columns:
+                                ws.column_dimensions[col[0].column_letter].width = min(
+                                    max(len(str(c_.value or "")) for c_ in col) + 2, 70)
+                    return buf_.getvalue()
+
+                stamp = datetime.now().strftime("%Y%m%d_%H%M")
+                st.download_button(f"Download all {len(rdf)} runs shown (Excel)",
+                                   run_workbook([r["run_id"] for r in runs_]), file_name=f"Run_history_{stamp}.xlsx")
+                st.divider()
+                pick_run = st.selectbox(
+                    "Open one run", [r["run_id"] for r in runs_], key="rh_pick",
+                    format_func=lambda rid: next(f"{r['started_at']} UTC · {r['kind']} · {r['case_id']} · "
+                                                 f"{r['evaluated']} evaluated, {r['skipped']} skipped, "
+                                                 f"{r['failed']} failed" for r in runs_ if r["run_id"] == rid))
+                rows_df, up_df = run_frames([pick_run])
+                if not rows_df.empty:
+                    status_f = st.radio("Show", ["Everything", "Skipped", "Failed", "To check"], horizontal=True,
+                                        key="rh_show")
+                    sv = rows_df["Status"].astype(str)
+                    view_ = rows_df if status_f == "Everything" else rows_df[
+                        sv.str.startswith(status_f) if status_f != "To check" else
+                        sv.str.contains("CHECK|check", regex=True)]
+                    cols_ = [c_ for c_ in ["File", "Student ID", "Name", "Batch", "Score /100", "Submission", "Status",
+                                           "Notes"] if c_ in view_.columns]
+                    st.dataframe(view_[cols_], hide_index=True, use_container_width=True,
+                                 column_config={"Status": st.column_config.TextColumn(width="large")})
+                with st.expander(f"Files uploaded in this run ({len(up_df)})"):
+                    st.dataframe(up_df.drop(columns=["Run started (UTC)", "Type", "Case", "By"], errors="ignore"),
+                                 hide_index=True, use_container_width=True)
+                st.download_button("Download this run (Excel)", run_workbook([pick_run]),
+                                   file_name=f"Run_{pick_run}.xlsx", key="rh_one")
+            if ss.get("admin_ok"):
+                with st.expander("Clear old run history (admin)"):
+                    old = st.selectbox("Delete runs older than", ["90 days", "180 days", "1 year"], key="rh_old")
+                    if st.button("Delete old runs", key="rh_del"):
+                        dd = {"90 days": 90, "180 days": 180, "1 year": 365}[old]
+                        db.erase_runs(before=(datetime.now(timezone.utc) - pd.Timedelta(days=dd))
+                                      .strftime("%Y-%m-%d %H:%M:%S"))
+                        st.success("Old runs deleted.")
+
 
 # ------------------------------------------------------------------ build key
 with t_build:
@@ -1224,13 +1369,17 @@ each case, and gives every student a Simandhar-branded evaluation report with a 
      (one sub-folder per student, named `StudentID_CaseID`). Each student's files are grouped by their name.
      A folder named differently is still accepted when it holds the student's roster ID or name (e.g. "Ravi Kumar"
      or "Ravi_Kumar_M01"); the row then says **CHECK NAME**. A name shared by two students is skipped.
+     Typing slips in the mock code don't matter: `M01`, `m01`, `M1`, `MO1` (letter O), `M0l`, `Mock 01`, with or
+     without `Batch-1` in the name, are all read as M01; a different mock (`MO2`) is kept apart.
      Download all the reports as one zip, and the results as Excel.
    - Evaluating the same student and case again replaces the earlier result.
 4. **Check before sharing**: open *What the system read* when the app asks you to. Items it could not read are marked
    0 and flagged. Boxes it could not link to a line are listed there; to mark one, use `field: <box name>` in the key.
    - Form 8949 line names: `I box` (A/B/C/G/H/I), `I 1 row 3 (d)` = Part I row 3 column (d), `I 2 (h)` = Part I
      totals column (h); Part II uses `II`. Building the key from a correct return fills these in for you.
-5. **Reports later**: use **Find a report** to download any student's report again, or to delete one evaluation.
+5. **Reports later**: use **Find a report / history → Student reports** to download any student's report again,
+   or to delete one evaluation. **Run history** keeps a record of every evaluation run: what was uploaded and,
+   for every file, whether it was evaluated, skipped or failed and why - download one run or a whole period as Excel.
 
 ### How marks are given
 - Every item in the key carries its own marks; the total is scaled to a **score out of 100**. Each case keeps its
