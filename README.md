@@ -37,6 +37,17 @@ results exist only in the open browser tab.
 | `tests/` | Automated tests (`python -m pytest tests`), with a blank 2025 Form 1040 as a test form |
 
 
+## Programme progress report for Deloitte (PDF)
+
+Attendance & Deloitte report → Report for Deloitte → **Download the programme progress report (PDF)**. A short,
+Simandhar-branded big-picture report for Deloitte management: headline numbers, deployment readiness, key messages,
+where Deloitte's help is needed, average score per mock and attendance per class date, batch comparison, and the names
+of every learner who needs attention. The integrity check is never included.
+
+Readiness (also a column in the tracker and the Excel learner report): **On track** = no concern; **Needs attention**
+= one concern; **Needs urgent attention** = two or more concerns, or absent for everything. Concerns are the tracker
+flags (low class attendance, mock returns missing, submission not accepted, MCQ tests missed, low scores).
+
 ## Test runs
 
 Left panel → **Test run - don't save anything**: returns are marked and reports made as usual, but nothing is written

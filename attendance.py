@@ -301,6 +301,21 @@ FLAG_LOW_PERF = "Not performing well"
 FLAG_ALL = "Absent for everything"          # no class joined, no mock return, no MCQ test
 FLAGS = [FLAG_ALL, FLAG_IMPROPER, FLAG_LOW_ATT, FLAG_MOCK, FLAG_MCQ, FLAG_LOW_PERF]
 
+# one readiness status per learner (Deloitte wants everyone deployable, so this is what they look at first)
+ON_TRACK, ATTENTION, URGENT = "On track", "Needs attention", "Needs urgent attention"
+READINESS = [ON_TRACK, ATTENTION, URGENT]
+
+
+def readiness(flags):
+    """On track = no concern; Needs attention = one; Needs urgent attention = two or more, or absent for
+    everything."""
+    fl = [f.strip() for f in str(flags or "").split(",") if f.strip()]
+    if not fl:
+        return ON_TRACK
+    if FLAG_ALL in fl or len(fl) >= 2:
+        return URGENT
+    return ATTENTION
+
 
 def tracker(students, attendance, evaluations, mcq, final_cases, improper, scores, cfg, min_att=80.0,
             low_perf=None):
@@ -383,7 +398,7 @@ def tracker(students, attendance, evaluations, mcq, final_cases, improper, score
                "MCQ missed": ", ".join(f"Test {t}" for t in missed_t),
                "Marks so far": None if r is None else r.get("Total / 100"),
                "% of possible so far": share,
-               "Flags": ", ".join(flags), "Flag count": len(flags)}
+               "Readiness": readiness(", ".join(flags)), "Flags": ", ".join(flags), "Flag count": len(flags)}
         for d in held:
             row[f"Class {d}"] = mine.get(d, ABSENT)
         rows.append(row)
@@ -421,6 +436,8 @@ def batch_overview(track):
         row = {"Batch": b, "Learners": len(t),
                "Classes held": int(t["Classes held"].max()),
                "Average attendance %": round(float(att.mean()), 1) if len(att) else None}
+        for k in READINESS:
+            row[k] = int((t["Readiness"] == k).sum()) if "Readiness" in t else 0
         for f in FLAGS:
             row[f] = int(t["Flags"].str.contains(f, regex=False).sum())
         rows.append(row)

@@ -146,3 +146,36 @@ def test_a_compiled_sheet_with_a_date_column_gives_one_class_per_date():
     recs, _ = session_records(res[0][0], match_rows(res[0][1], ROSTER), ROSTER)
     assert {r["student_id"]: r["status"] for r in recs if r["batch"] == "Batch-1"}["164001"] == PRESENT
     assert len(read_reports(REPORT, "daily.xlsx")) == 1                # the daily report still works
+
+
+def test_readiness_groups_learners_by_concerns():
+    from attendance import ATTENTION, ON_TRACK, URGENT, readiness
+    assert readiness("") == ON_TRACK
+    assert readiness(FLAG_MCQ) == ATTENTION
+    assert readiness(f"{FLAG_MCQ}, {FLAG_LOW_PERF}") == URGENT
+    assert readiness(FLAG_ALL) == URGENT
+    t, _, _ = _track()
+    r = t.set_index("Student ID")
+    assert r.loc["164001", "Readiness"] == ON_TRACK and r.loc["164003", "Readiness"] == URGENT
+
+
+def test_programme_report_for_deloitte_has_the_big_picture_and_no_integrity():
+    import io as _io
+
+    from pypdf import PdfReader
+
+    from deloitte_pdf import deloitte_report_pdf, programme_data
+    t, att, studs = _track()
+    cfg = load_settings({})
+    evs = [dict(e, batch=b) for e in [{"student_id": "164001", "case_id": "M01", "pct": 0.95, "on_time": 1},
+                                      {"student_id": "164004", "case_id": "M01", "pct": 0.30, "on_time": 1}]
+           for b in [next(s["batch"] for s in studs if s["student_id"] == e["student_id"])]]
+    mcq = [{"student_id": "164001", "test_no": 1, "marks": 45}, {"student_id": "164004", "test_no": 1, "marks": 40}]
+    data = programme_data(t, studs, evs, mcq, ["M01"], {"M01": {"title": "Mock 1"}}, cfg, class_summary(att, studs))
+    allb = data["batches"].set_index("Batch").loc["All batches"]
+    assert allb["Learners"] == 5 and allb["On track"] + allb["Needs attention"] + allb["Needs urgent attention"] == 5
+    assert "Integrity flags" not in data["batches"].columns
+    text = "".join(p.extract_text() for p in PdfReader(_io.BytesIO(deloitte_report_pdf(data, cfg))).pages)
+    assert "Programme Progress Report" in text and "Needs urgent attention" in text
+    assert "164003" in text                                    # absent for everything -> named
+    assert "integrity" not in text.lower() and "copied" not in text.lower() and "At risk" not in text

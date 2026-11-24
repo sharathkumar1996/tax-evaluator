@@ -580,10 +580,11 @@ with t_att:
         import json
 
         from attendance import (ABSENT, BELOW, FLAG_ALL, FLAG_IMPROPER, FLAG_LOW_ATT, FLAG_LOW_PERF, FLAG_MCQ,
-                                FLAG_MOCK, FLAGS, PRESENT, AttendanceError, alias_key, batch_overview,
+                                FLAG_MOCK, FLAGS, PRESENT, READINESS, AttendanceError, alias_key, batch_overview,
                                 class_summary, deloitte_workbook, flag_list, match_rows, read_reports,
                                 session_records, tracker)
         from batchreport import improper_submissions, prepare
+        from deloitte_pdf import deloitte_report_pdf, programme_data
         from roster_flag import ROW_CSS, panel_html
 
         acfg = load_settings(db.settings())
@@ -759,7 +760,7 @@ with t_att:
                            f"submission). Low class attendance = below {min_att:g}% of classes at 80%+ of the "
                            f"session. Not performing well = below {low_perf:g}% of the marks possible so far. "
                            "Change these under 'Report for Deloitte'.")
-                show_cols = ["Student ID", "Name", "Batch", "Flags", "Classes held", "Present (80%+)", "Below 80%",
+                show_cols = ["Student ID", "Name", "Batch", "Readiness", "Flags", "Classes held", "Present (80%+)", "Below 80%",
                              "Absent", "Attendance %", "Mocks due", "Mocks evaluated", "Improper submissions",
                              "Mocks not received", "MCQ tests held", "MCQ tests taken", "Marks so far",
                              "% of possible so far", "Not received", "Improper details", "MCQ missed"] + \
@@ -804,11 +805,35 @@ with t_att:
             ov_all = batch_overview(track)
             if not ov_all.empty:
                 st.dataframe(ov_all, hide_index=True, use_container_width=True)
+
+            st.markdown("##### Programme progress report (PDF) - the big picture")
+            st.write("A short Simandhar-branded PDF for Deloitte management: headline numbers, deployment "
+                     "readiness (on track / needs attention / needs urgent attention), key messages, where we need "
+                     "Deloitte's help, progress per mock and class, a batch comparison, and the names of every "
+                     "learner who needs attention. The integrity check is not included.")
+            try:
+                trainers_a = json.loads(db.settings().get("batch_trainers") or "{}")
+            except ValueError:
+                trainers_a = {}
+            pdata = programme_data(track, studs_a, evs_a, mcq_a, fc_a, {c["case_id"]: c for c in db.cases()},
+                                   acfg, class_summary(att_a, studs_a), trainers_a)
+            if not track.empty:
+                rd = pdata["batches"].set_index("Batch").loc["All batches"]
+                k3 = st.columns(3)
+                for i_, r_ in enumerate(READINESS):
+                    k3[i_].metric(r_, int(rd.get(r_, 0)))
+            st.download_button("Download the programme progress report (PDF)",
+                               deloitte_report_pdf(pdata, acfg, institute, min_att=min_att, low_perf=low_perf)
+                               if not track.empty else b"",
+                               file_name=f"Deloitte_Form1040_Progress_Report_{datetime.now():%Y%m%d}.pdf",
+                               mime="application/pdf", type="primary", disabled=track.empty)
+
+            st.markdown("##### Learner report (Excel) - every learner, one sheet per concern")
             st.download_button("Download the report for Deloitte (Excel)",
                                deloitte_workbook(track, class_summary(att_a, studs_a), institute,
                                                  min_att=min_att, low_perf=low_perf),
                                file_name=f"Deloitte_Form1040_Learner_Report_{datetime.now():%Y%m%d}.xlsx",
-                               type="primary", disabled=track.empty)
+                               disabled=track.empty)
 
 # ------------------------------------------------------------------ management
 with t_mgmt:
