@@ -37,6 +37,13 @@ results exist only in the open browser tab.
 | `tests/` | Automated tests (`python -m pytest tests`), with a blank 2025 Form 1040 as a test form |
 
 
+## Test runs
+
+Left panel → **Test run - don't save anything**: returns are marked and reports made as usual, but nothing is written
+to the database (no answer key/case, scores, mistakes, integrity data or run history). Reports and downloads are
+stamped / named `TEST_...`. Saved cases and the roster can still be used. A key uploaded during a test run is saved
+as a case only when you switch the test run off.
+
 ## Batch reports
 
 Tab *Batch reports*: filters (batches, mock returns); overview with a batch comparison and the average score per

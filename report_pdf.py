@@ -68,7 +68,7 @@ def _lineref(r):
 
 
 def build_report(student_name, student_id, key, rows, cats, total, out_of, file_name, institute,
-                 evaluated_on=None):
+                 evaluated_on=None, test_run=False):
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=14 * mm, rightMargin=14 * mm,
                             topMargin=14 * mm, bottomMargin=16 * mm,
@@ -78,7 +78,11 @@ def build_report(student_name, student_id, key, rows, cats, total, out_of, file_
 
     story.append(_p(institute.upper(), ParagraphStyle("inst", parent=SMALL, fontName=FONT_BOLD,
                                                        textColor=NAVY, fontSize=8)))
-    story.append(Paragraph("Mock Return Evaluation Report", H1))
+    story.append(Paragraph("Mock Return Evaluation Report" + (" <font color='#8E1B3A'>- TEST RUN</font>"
+                                                             if test_run else ""), H1))
+    if test_run:
+        story.append(Paragraph("TEST RUN - not saved and not part of the student's results.",
+                               ParagraphStyle("testrun", parent=SMALL, fontName=FONT_BOLD, textColor=MAROON)))
     story.append(_p(f"Case {key.case_id}: {key.title}  |  Tax year {key.tax_year}", SMALL))
     rule = Table([[""]], colWidths=[W], rowHeights=[2])
     rule.setStyle(TableStyle([("LINEBELOW", (0, 0), (-1, -1), 0.8, MAROON)]))

@@ -52,7 +52,8 @@ def clean(x):
 
 
 def report_name(student_id, case_id):
-    return f"Evaluation_report_{clean(student_id)}_{clean(case_id)}.pdf"
+    test = "TEST_" if st.session_state.get("test_run") else ""
+    return f"{test}Evaluation_report_{clean(student_id)}_{clean(case_id)}.pdf"
 
 
 # ------------------------------------------------------------------ access
@@ -121,6 +122,13 @@ with st.sidebar:
         st.info("No database set up: results last only while this tab is open.", icon="ℹ️")
     institute = st.text_input("Institute name on reports", secret("institute", "Simandhar Education"))
     staff = st.text_input("Your name (recorded with each evaluation)", key="staff")
+    TEST = st.toggle("Test run - don't save anything", key="test_run",
+                     help="For trying out a key or sample returns. Nothing is written to the database: not the "
+                          "answer key, scores, mistakes, integrity data or the run history. Reports are stamped "
+                          "TEST RUN. Saved cases and the roster can still be used.")
+    if TEST:
+        st.markdown("<div style='background:#8E1B3A;color:#fff;padding:8px 10px;border-radius:6px;"
+                    "font-weight:600'>TEST RUN - nothing is being saved</div>", unsafe_allow_html=True)
 
     st.header("1. Case")
     saved = db.cases() if db else []
@@ -133,7 +141,7 @@ with st.sidebar:
                 cid = pick.split(" - ")[0]
                 use_key(db.case_key_bytes(cid), f"saved:{cid}")
     key_file = st.file_uploader("Upload a new or updated answer key (.xlsx)", type=["xlsx"], key="keyfile")
-    if key_file is not None and (key_file.name, key_file.size) != ss.get("prev_keyfile"):
+    if key_file is not None and (key_file.name, key_file.size, TEST) != ss.get("prev_keyfile"):
         try:
             k_new = parse_key(key_file.getvalue())
         except KeyError_ as e:
@@ -144,7 +152,7 @@ with st.sidebar:
             k_new = None
         if k_new:
             ok = True
-            if db:
+            if db and not TEST:
                 existing = {c["case_id"]: c for c in saved}
                 n_done = db.case_eval_count(k_new.case_id) if k_new.case_id in existing else 0
                 new_hash = hashlib.sha256(key_file.getvalue()).hexdigest()[:16]
@@ -156,9 +164,11 @@ with st.sidebar:
                 if ok:
                     db.save_case(k_new, key_file.getvalue(), key_file.name)
             if ok:
-                ss.prev_keyfile = (key_file.name, key_file.size)
+                ss.prev_keyfile = (key_file.name, key_file.size, TEST)     # turning test run off saves the key
                 use_key(key_file.getvalue(), key_file.name)
-                if db:
+                if TEST:
+                    st.caption("Test run: this key is used for now but not saved as a case.")
+                elif db:
                     st.rerun()
     if ss.key:
         k = ss.key
@@ -196,7 +206,7 @@ def evaluate_files(files, sid, sname, key):
     m = return_metrics(rows)
     cats, total, out_of = summarise(rows)
     label = files[0][0] if len(files) == 1 else f"{len(files)} files"
-    report = build_report(sname, sid, key, rows, cats, total, out_of, label, institute)
+    report = build_report(sname, sid, key, rows, cats, total, out_of, label, institute, test_run=TEST)
     try:
         fp = fingerprints(files, ret)
     except Exception:              # integrity data must never stop a return from being marked
@@ -208,7 +218,7 @@ def evaluate_files(files, sid, sname, key):
 
 
 def save(sid, res, on_time=None):
-    if db:
+    if db and not TEST:
         db.save_evaluation(sid, ss.key.case_id, res["file_label"], res["m"], res["rows"], ss.key_hash, staff or "",
                            source_format=res["format"], notes=" | ".join(res["notes"]), fingerprints=res.get("fp"),
                            on_time=on_time)
@@ -219,8 +229,8 @@ SUBMITTED = ["On time", "Late"]
 
 def record_run(kind, case_id, started, uploads, rows, options=None):
     """Keep a record of an evaluation run (everything except the student PDF reports): what was uploaded and,
-    for every file / student, whether it was evaluated, skipped or failed and why."""
-    if not db:
+    for every file / student, whether it was evaluated, skipped or failed and why. Not kept in a test run."""
+    if not db or TEST:
         return
     try:
         st_ = [str(r.get("Status") or "") for r in rows]
@@ -286,6 +296,10 @@ with t_eval:
     else:
         k = ss.key
         st.subheader(f"2. Evaluate returns - Case {k.case_id}")
+        if TEST:
+            st.warning("**Test run:** returns are marked and reports are made as usual, but nothing is saved - "
+                       "not scores, mistakes, integrity data or run history. Download what you need before leaving. "
+                       "Switch it off in the left panel for real evaluations.", icon="🧪")
         mode = st.radio("How many returns?", ["One return", "Many returns at once (bulk)"], horizontal=True,
                         key="eval_mode")
 
@@ -310,7 +324,7 @@ with t_eval:
             sid = c2.text_input("Student ID", value=guess, key=f"sid{ss.uploader_n}").strip().upper()
             known = db.student(sid) if (db and sid) else None
             sname = c1.text_input("Student name", value=(known or {}).get("name") or "", key=f"sn{ss.uploader_n}_{sid}")
-            if db and sid and not known:
+            if db and sid and not known and not TEST:
                 st.markdown(callout_html([sid], "student ID", "It will be evaluated and saved, but it won't appear "
                                          "in final results or batch reports until you add it under "
                                          "<b>Students &amp; batches</b>."), unsafe_allow_html=True)
@@ -364,7 +378,9 @@ with t_eval:
                                        or res["unlinked"] else ""),
                                     "Notes": " | ".join(res["notes"])[:300]})])
                     ss.last = rec
-                if db and saved:
+                if TEST:
+                    st.toast("Test run - not saved", icon="🧪")
+                elif db and saved:
                     st.toast("Saved to the database", icon="✅")
             r = ss.last
             if r and r["Case"] == k.case_id:
@@ -395,7 +411,8 @@ with t_eval:
                                      accept_multiple_files=True if bpick != "A whole folder" else "directory",
                                      key=f"bulk{ss.uploader_n}_{bpick[0]}")
             c1, c2 = st.columns(2)
-            skip_done = c1.checkbox("Skip students already evaluated for this case", value=bool(db), disabled=not db,
+            skip_done = c1.checkbox("Skip students already evaluated for this case", value=bool(db) and not TEST,
+                                    disabled=not db or TEST,
                                     help="Lets you restart an interrupted upload without marking anything twice.")
             make_reports = c2.checkbox("Also create the PDF report for every student", value=True)
             s1, s2 = st.columns([1, 2])
@@ -461,14 +478,15 @@ with t_eval:
                             "Skip already evaluated": skip_done, "PDF reports made": make_reports})
                 ss.bulk_out = {"case": k.case_id, "table": pd.DataFrame(out),
                                "zip": zbuf.getvalue() if make_reports else None,
-                               "when": datetime.now().strftime("%Y%m%d_%H%M")}
+                               "when": datetime.now().strftime("%Y%m%d_%H%M"), "test": TEST}
             bo = ss.bulk_out
             if bo and bo["case"] == k.case_id:
                 df = bo["table"]
                 n_ok = int(df["Status"].str.startswith("Evaluated").sum())
                 st.success(f"{n_ok} evaluated · {int(df['Status'].str.startswith('Skipped').sum())} skipped · "
                            f"{int(df['Status'].str.startswith('Failed').sum())} failed"
-                           + (" · all saved to the database" if db else ""))
+                           + (" · TEST RUN - nothing saved" if bo.get("test") else
+                              " · all saved to the database" if db else ""))
                 misnamed = df[df["Status"].str.contains("CHECK NAME", na=False)]
                 if len(misnamed):
                     st.warning(f"{len(misnamed)} student(s) did not name their files `StudentID_{k.case_id}` and were "
@@ -485,11 +503,11 @@ with t_eval:
                 d1, d2 = st.columns(2)
                 if bo["zip"] and n_ok:
                     d1.download_button("Download all reports (zip)", bo["zip"],
-                                       file_name=f"Evaluation_reports_{k.case_id}_{bo['when']}.zip")
+                                       file_name=f"{'TEST_' if bo.get('test') else ''}Evaluation_reports_{k.case_id}_{bo['when']}.zip")
                 d2.download_button("Download this upload's results (Excel)", excel_bytes([("Results", df)]),
-                                   file_name=f"Bulk_results_{k.case_id}_{bo['when']}.xlsx")
-                if not db:
-                    st.caption("No database: download these now - they are not saved anywhere else.")
+                                   file_name=f"{'TEST_' if bo.get('test') else ''}Bulk_results_{k.case_id}_{bo['when']}.xlsx")
+                if not db or bo.get("test"):
+                    st.caption("Not saved: download these now - they are not kept anywhere else.")
 
         if ss.results:
             with st.expander(f"Returns evaluated one-by-one in this session ({len(ss.results)})"):
@@ -1603,7 +1621,7 @@ with t_build:
         try:
             gfiles = [(f.name, f.getvalue()) for f in good]
             data, n, forms = draft_from_return(gfiles, cid, ctitle, int(cyear), dmarks, dunx)
-            if db and n:
+            if db and n and not TEST:
                 try:
                     db.save_fingerprints(TRAINER, str(cid).strip(), fingerprints(gfiles, read_return(gfiles)))
                 except Exception:
