@@ -808,9 +808,9 @@ with t_att:
 
             st.markdown("##### Programme progress report (PDF) - the big picture")
             st.write("A short Simandhar-branded PDF for Deloitte management: headline numbers, deployment "
-                     "readiness (on track / needs attention / needs urgent attention), key messages, where we need "
-                     "Deloitte's help, progress per mock and class, a batch comparison, and the names of every "
-                     "learner who needs attention. The integrity check is not included.")
+                     "readiness (on track / needs attention / needs urgent attention), key messages, progress per "
+                     "mock and class, a batch comparison and concerns at a glance. No learner names and no "
+                     "integrity check.")
             try:
                 trainers_a = json.loads(db.settings().get("batch_trainers") or "{}")
             except ValueError:

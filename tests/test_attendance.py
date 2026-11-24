@@ -177,5 +177,5 @@ def test_programme_report_for_deloitte_has_the_big_picture_and_no_integrity():
     assert "Integrity flags" not in data["batches"].columns
     text = "".join(p.extract_text() for p in PdfReader(_io.BytesIO(deloitte_report_pdf(data, cfg))).pages)
     assert "Programme Progress Report" in text and "Needs urgent attention" in text
-    assert "164003" in text                                    # absent for everything -> named
+    assert "164003" not in text and "Where we need" not in text   # big picture only: no names, no asks
     assert "integrity" not in text.lower() and "copied" not in text.lower() and "At risk" not in text

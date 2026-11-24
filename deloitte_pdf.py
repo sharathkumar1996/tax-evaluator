@@ -1,5 +1,5 @@
 """Programme progress report for Deloitte: a Simandhar-branded PDF that gives the big picture - where the
-training stands, how each batch is doing, and above all which learners need attention so everyone can be deployed.
+training stands, how each batch is doing and how many learners are on track for deployment. No learner names.
 
 Built from the same learner tracker as the Deloitte Excel (attendance.tracker), so the numbers always agree.
 Deliberately leaves out the integrity check (copying flags); it is not part of this report.
@@ -155,7 +155,7 @@ def key_messages(data, cfg, min_att, low_perf):
     allb = b.set_index("Batch").loc[ALL]
     on, att_n, urg = (int((t["Readiness"] == k).sum()) for k in READINESS)
     out.append(f"<b>{on} of {n} learners ({100 * on / n:.0f}%) are on track</b>; {att_n} need attention and "
-               f"<b>{urg} need urgent attention</b> (named at the end of this report).")
+               f"<b>{urg} need urgent attention</b>.")
     a = _num(allb.get("Attendance %"))
     if a is not None:
         low = int(t["Flags"].str.contains(FLAG_LOW_ATT, regex=False).sum())
@@ -178,35 +178,7 @@ def key_messages(data, cfg, min_att, low_perf):
     lp = int(t["Flags"].str.contains(FLAG_LOW_PERF, regex=False).sum())
     if lp:
         out.append(f"{lp} learner(s) are scoring below {low_perf:g}% of the marks possible so far.")
-    nb = b[b["Batch"] != ALL]
-    if len(nb) > 1 and nb["Learners"].sum():
-        nb = nb.assign(share=nb[URGENT] / nb["Learners"].where(nb["Learners"] > 0))
-        w = nb.sort_values("share", ascending=False).iloc[0]
-        if w[URGENT]:
-            out.append(f"{_esc(w['Batch'])} has the highest share needing urgent attention "
-                       f"({int(w[URGENT])} of {int(w['Learners'])}).")
     return out
-
-
-def asks_for_deloitte(data, cfg):
-    """What Simandhar asks Deloitte to help with (only the ones that apply)."""
-    c = data["concerns"].set_index("flag")["Learners"]
-    asks = []
-    if c.get(FLAG_ALL, 0):
-        asks.append(f"<b>{c[FLAG_ALL]} learner(s) have not joined any class, mock or MCQ test.</b> Please confirm "
-                    "whether they are still in the programme, and if so ask their managers to free up time.")
-    if c.get(FLAG_LOW_ATT, 0):
-        asks.append(f"{c[FLAG_LOW_ATT]} learner(s) have low class attendance - a reminder from their managers "
-                    "that the sessions count towards deployment would help.")
-    if c.get(FLAG_MOCK, 0) or c.get(FLAG_IMPROPER, 0):
-        asks.append(f"{c.get(FLAG_MOCK, 0)} learner(s) have mock returns missing and {c.get(FLAG_IMPROPER, 0)} "
-                    "submitted a return that could not be accepted (wrong folder/file name or unreadable file). "
-                    f"Mock returns carry {cfg['w_accuracy'] + cfg['w_on_time']:g} of the 100 final marks, so every "
-                    "missed return costs marks.")
-    if c.get(FLAG_LOW_PERF, 0):
-        asks.append(f"{c[FLAG_LOW_PERF]} learner(s) are scoring low. Simandhar's walkthrough videos and query "
-                    "sessions cover the common mistakes; we suggest these learners make use of them.")
-    return asks
 
 
 def deloitte_report_pdf(data, cfg, institute="Simandhar Education", min_att=80.0, low_perf=70.0, as_of=None):
@@ -258,16 +230,6 @@ def deloitte_report_pdf(data, cfg, institute="Simandhar Education", min_att=80.0
     for s in key_messages(data, cfg, min_att, low_perf):
         story.append(Paragraph(s, bul, bulletText="•"))
 
-    asks = asks_for_deloitte(data, cfg) if n else []
-    if asks:
-        story.append(Paragraph("Where we need Deloitte's help", H2))
-        box = [Paragraph(a, bul, bulletText="•") for a in asks]
-        bt = Table([[box]], colWidths=[W])
-        bt.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), MAROON_LIGHT),
-                                ("LINEBEFORE", (0, 0), (0, -1), 3, MAROON),
-                                ("TOPPADDING", (0, 0), (-1, -1), 5), ("BOTTOMPADDING", (0, 0), (-1, -1), 5)]))
-        story.append(bt)
-
     # ---- progress over time
     story.append(CondPageBreak(110 * mm))
     story.append(Paragraph("Progress over time", H2))
@@ -310,34 +272,11 @@ def deloitte_report_pdf(data, cfg, institute="Simandhar Education", min_att=80.0
                                          "far. A learner can have more than one concern.", SMALL),
                                _table(data["concerns"][["Concern", "Learners"]], [40, 12], W * 0.55)]))
 
-    # ---- learners needing attention
-    for level, intro in ((URGENT, "Two or more concerns, or no participation at all. These learners are the "
-                                  "priority for follow-up with their managers."),
-                         (ATTENTION, "One concern so far - usually recoverable with a nudge.")):
-        sub = t[t["Readiness"] == level] if n else t
-        story.append(CondPageBreak(50 * mm))
-        story.append(Paragraph(f"{level} ({len(sub)})", H2))
-        story.append(Paragraph(intro + " Sorted by batch, lowest score first.", SMALL))
-        story.append(Spacer(1, 2))
-        if sub.empty:
-            story.append(Paragraph("None.", SMALL))
-            continue
-        lst = sub.assign(
-            Mocks=sub["Mocks evaluated"].astype(int).astype(str) + " / " + sub["Mocks due"].astype(int).astype(str),
-            MCQ=sub["MCQ tests taken"].astype(int).astype(str) + " / " + sub["MCQ tests held"].astype(int).astype(str),
-            _s=sub["% of possible so far"].fillna(-1),
-            **{"Attendance %": sub["Attendance %"].round(0), "% of possible so far": sub["% of possible so far"].round(0)})
-        lst = lst.sort_values(["Batch", "_s", "Student ID"])
-        lst = lst[["Batch", "Student ID", "Name", "Attendance %", "Mocks", "MCQ", "% of possible so far",
-                   "Concerns"]].rename(columns={"% of possible so far": "Score so far %", "Attendance %": "Classes %",
-                                                "Mocks": "Mocks done / due", "MCQ": "MCQ done / held"})
-        story.append(_table(lst, [10, 11, 21, 9, 9, 9, 9, 34], W))
-
     story.append(Spacer(1, 8))
-    story.append(Paragraph("Score so far = share of the marks possible from the mock returns and MCQ tests held so far "
-                           f"(final score: mock accuracy {cfg['w_accuracy']:g} + on-time submission "
-                           f"{cfg['w_on_time']:g} + MCQ tests {cfg['w_mcq']:g} = 100; pass mark {cfg['pass_mark']:g}). "
-                           "Full learner-level detail is in the Excel learner report.", SMALL))
+    story.append(Paragraph("Readiness: On track = no concern so far; Needs attention = one concern; Needs urgent "
+                           "attention = two or more concerns, or no class, mock return or MCQ test at all. Final score: "
+                           f"mock accuracy {cfg['w_accuracy']:g} + on-time submission {cfg['w_on_time']:g} + MCQ tests "
+                           f"{cfg['w_mcq']:g} = 100; pass mark {cfg['pass_mark']:g}.", SMALL))
 
     def footer(canvas, d):
         canvas.saveState()
