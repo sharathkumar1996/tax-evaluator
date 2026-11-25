@@ -17,7 +17,9 @@ results exist only in the open browser tab.
 ## Files
 | File | Purpose |
 |---|---|
-| `app.py` | The Streamlit app |
+| `app.py` | Sign-in, database connection and page navigation |
+| `ui/core.py` | Shared state: per-run data cache, the sidebar filters, small UI kit (theme, metrics, on-demand downloads) |
+| `ui/evaluate.py` … `ui/help.py` | One file per page: Evaluate, Learners, Submissions, Insights, Reports, Setup, Admin, Help |
 | `readers.py` | Entry point for reading a return; checks file limits and damaged files |
 | `irs_reader.py` | Reads IRS fillable forms (the values stored in the form's boxes) |
 | `grader_core.py` | Form/line names, loading the answer key, and marking a return against it |
@@ -37,9 +39,25 @@ results exist only in the open browser tab.
 | `tests/` | Automated tests (`python -m pytest tests`), with a blank 2025 Form 1040 as a test form |
 
 
+## Pages
+
+| Page | What it is for |
+|---|---|
+| **Evaluate** | Pick the mock return, then mark *One student* or *A batch*; On time / Late, test run |
+| **Learners** | One row per learner (classes, mocks, MCQs, marks, flags); click a row for the learner's profile and reports |
+| **Submissions** | One mock return: evaluated (edit On time / Late with a reason), improper, not received, change log |
+| **Insights** | Batch comparison and trend, one batch's mocks and common mistakes, integrity checks |
+| **Reports** | Trainer, Deloitte, management and integrity files – built only when you press *Prepare* |
+| **Setup** | Roster, mock returns (answer keys, build a key), class attendance, MCQ marks, settings |
+| **Admin** | Run history; erasing data (admin password) |
+| **Help** | How the app works |
+
+The sidebar holds one set of filters (batches, mock returns) used by Learners, Submissions, Insights and Reports,
+and *Your name*, recorded with every change. Only the page on screen runs, and each run reads the database once.
+
 ## Programme progress report for Deloitte (PDF)
 
-Attendance & Deloitte report → Report for Deloitte → **Download the programme progress report (PDF)**. A short,
+Reports → Deloitte → **Prepare progress report**. A short,
 Simandhar-branded big-picture report for Deloitte management: headline numbers, deployment readiness, key messages,
 average score per mock and attendance per class date, batch comparison and concerns at a glance. No learner names and
 no integrity check.
@@ -50,28 +68,28 @@ flags (low class attendance, mock returns missing, submission not accepted, MCQ 
 
 ## Test runs
 
-Left panel → **Test run - don't save anything**: returns are marked and reports made as usual, but nothing is written
+Evaluate → **Test run**: returns are marked and reports made as usual, but nothing is written
 to the database (no answer key/case, scores, mistakes, integrity data or run history). Reports and downloads are
 stamped / named `TEST_...`. Saved cases and the roster can still be used. A key uploaded during a test run is saved
 as a case only when you switch the test run off.
 
 ## Batch reports
 
-Tab *Batch reports*: filters (batches, mock returns); overview with a batch comparison and the average score per
-mock per batch; batch detail (students, mocks, returns not received, common mistakes, integrity); a consolidated
+*Insights*: a batch comparison and the average score per mock per batch; one batch's mocks, score spread and common
+mistakes; integrity. *Reports → Trainers*: a consolidated
 Simandhar-branded PDF + Excel per batch for its trainer (`batchreport.py`, `batch_pdf.py`), one at a time or all as
-a zip; and the batch → trainer list (stored in settings as `batch_trainers`).
+a zip. Trainers per batch are set under *Setup → Settings* (stored as `batch_trainers`).
 
 ## Run history
 
-*Find a report / history → Run history*: every single and bulk evaluation run is recorded (table `eval_runs`):
+*Admin → Run history*: every single and bulk evaluation run is recorded (table `eval_runs`):
 the files uploaded, the run's options, and for each file or student whether it was evaluated, skipped or failed and
 why. Filter by case, period and type; download one run or the whole period as Excel. Student PDF reports are not
 stored. Erasing a student removes their rows from the history; admins can delete runs older than 90 days / 1 year.
 
 ## Final course score
 
-Management dashboard → *Final results*: return accuracy 60 (5 marks per mock return × its score; 12 returns at
+*Learners* (Progress so far / Final result) and *Reports → Management*: return accuracy 60 (5 marks per mock return × its score; 12 returns at
 100 = 60; missing = 0) + on-time submission 20 (1.67 per return on time, all 12 = 20; late = 0) + MCQ tests 20
 (5 marks per test × marks/50). Marks add up as the course goes on. Pass mark 70.
 All of these are settings (`finalscore.DEFAULTS`, changed in the app with the admin password).
@@ -81,11 +99,11 @@ All of these are settings (`finalscore.DEFAULTS`, changed in the app with the ad
 - MCQ marks: Excel/CSV with *Student ID* and *Test 1..4* columns (or one *Marks* column plus the test number).
 - Views: *Progress so far* (marks earned out of 100, plus marks possible from what the batch has done; no
   result label) and *Final* (Pass, or At risk below 70).
-- *Attendance & Deloitte report* tab: upload the daily 80% attendance reports; a learner tracker brings classes,
+- *Setup → Attendance*: upload the daily 80% attendance reports; the *Learners* page brings classes,
   mock returns (incl. improper submissions, shaded maroon), MCQ tests and marks together with flags; one branded
   Excel report for Deloitte (summary, every learner, one sheet per concern, class-wise).
 - Students not on the roster are shaded maroon and tagged NOT ON ROSTER on every screen and Excel download.
-- *Submission status* lists, per case, improper submissions (could not be evaluated, no PDF, not matched,
+- *Submissions* lists, per mock return, improper submissions (could not be evaluated, no PDF, not matched,
   named wrongly) and students not received (did not attempt).
 - Downloads: results workbook (results, scoring settings, status changes) and a branded scorecard PDF per student
   (`scorecard.py`).
@@ -120,8 +138,7 @@ Notes
 ## Saving results permanently (Neon database)
 
 Without a database the app works, but results disappear when the browser tab closes.
-With one, every evaluation is saved, and the **Find a report**, **Students & batches**, **Integrity checks**
-and **Data management** tabs become available. (The **Management dashboard** tab is being rebuilt.)
+With one, every evaluation is saved, and the **Learners**, **Submissions**, **Insights**, **Reports** and **Admin** pages work.
 
 1. Create a free account at neon.com and a project (any name, region close to your users).
 2. On the project dashboard click **Connect** and copy the connection string. It looks like
@@ -136,7 +153,7 @@ Only scores and mistakes are stored, not the returns: about 20 rows per return, 
 fit easily in the free 1 GB. The sidebar shows how much space is used.
 
 ## Erasing data
-The **Data management** tab erases one case's results, a whole case, a batch, one student, results of IDs
+**Admin → Erase data** erases one case's results, a whole case, a batch, one student, results of IDs
 not on the roster, or everything. It is protected by `admin_password` (Secrets); if that is not set, the
 staff password is used. Erasing cannot be undone.
 
@@ -213,7 +230,7 @@ printed on the form, not boxes, so leave them out of answer keys. For each other
 return through the app and check **What the system read** before marking students.
 
 ## Integrity checks (copying)
-The **Integrity checks** tab compares every pair of returns of the same case, across the selected batches,
+**Insights → Integrity** compares every pair of returns of the same case, across the selected batches,
 and explains in plain words what links them. Evidence it looks for:
 
 | Evidence | Points |
