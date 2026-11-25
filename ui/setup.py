@@ -300,14 +300,21 @@ def _settings():
                 st.toast("Scoring saved")
                 st.rerun()
 
-    st.markdown("##### Flags")
+    st.markdown("##### Flags and ratings")
     with st.form("flags_form"):
         r1, r2 = st.columns(2)
         new_min = r1.number_input("Low class attendance below (% of classes at 80%+)", 0.0, 100.0, data.min_att, 5.0)
         new_low = r2.number_input("Not performing well below (% of marks possible so far)", 0.0, 100.0,
                                   data.low_perf, 5.0)
+        st.caption("Learners not on the roster are rated **Consistent** when they submit at least this share of the "
+                   "mock returns held so far and average at least this score.")
+        r3, r4 = st.columns(2)
+        off_rate = r3.number_input("Consistent: mock returns submitted (% of those held)", 0.0, 100.0,
+                                   data.off_min_rate, 5.0)
+        off_avg = r4.number_input("Consistent: average score at least (%)", 0.0, 100.0, data.off_min_avg, 5.0)
         if st.form_submit_button("Save flags"):
-            ctx.db.save_settings({"att_min_pct": str(new_min), "low_perf_pct": str(new_low)})
+            ctx.db.save_settings({"att_min_pct": str(new_min), "low_perf_pct": str(new_low),
+                                  "offroster_min_rate": str(off_rate), "offroster_min_avg": str(off_avg)})
             st.toast("Saved")
             st.rerun()
 

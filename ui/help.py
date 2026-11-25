@@ -14,6 +14,13 @@ TEXT = """
 The **sidebar filters** (batches, mock returns) apply to Learners, Submissions, Insights and Reports.
 Enter **your name** in the sidebar so changes are recorded against you.
 
+### Learners not on the roster
+Returns from IDs that are not on the roster are still marked and saved. **Learners → Not on roster** tracks them,
+because Deloitte may take on those who are consistent: *Consistent* = submitted at least 80% of the mock returns
+held so far and averaged at least the pass mark; *Regular, low scores*; *Irregular*. Each shows the trend (first
+vs latest score). Click one to see their returns, download a report, or **Add to roster** – their saved returns
+then count in results. The list is also under **Reports → Deloitte**. Limits are under **Setup → Settings**.
+
 ### How learners must save their return
 - Fill in the IRS fillable PDFs in **Adobe Acrobat Reader** and **save** them (File > Save). One PDF per form.
 - **Don't print to PDF** or flatten – that removes the boxes and the file is refused.

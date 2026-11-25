@@ -31,6 +31,7 @@ results exist only in the open browser tab.
 | `batch_pdf.py` | Consolidated batch report (PDF and Excel) for the trainers |
 | `finalscore.py` | Final course score (accuracy + on-time + MCQ), MCQ sheet reading |
 | `scorecard.py` | Final scorecard PDF and results workbook |
+| `offroster.py` | Consistency rating of learners not on the roster (Deloitte may take on the consistent ones) |
 | `metrics.py` | Per-return figures saved with each evaluation; rebuilding a saved report |
 | `pdf_common.py` | Shared branded PDF styles (used by the integrity report) |
 | `answer_key_template.xlsx` | Blank key for trainers (downloadable inside the app) |
@@ -44,7 +45,7 @@ results exist only in the open browser tab.
 | Page | What it is for |
 |---|---|
 | **Evaluate** | Pick the mock return, then mark *One student* or *A batch*; On time / Late, test run |
-| **Learners** | One row per learner (classes, mocks, MCQs, marks, flags); click a row for the learner's profile and reports |
+| **Learners** | One row per learner (classes, mocks, MCQs, marks, flags); click a row for the learner's profile and reports. *Not on roster* tracks learners whose returns were marked without being on the roster, rated Consistent / Regular, low scores / Irregular (`offroster.py`), with *Add to roster* |
 | **Submissions** | One mock return: evaluated (edit On time / Late with a reason), improper, not received, change log |
 | **Insights** | Batch comparison and trend, one batch's mocks and common mistakes, integrity checks |
 | **Reports** | Trainer, Deloitte, management and integrity files – built only when you press *Prepare* |

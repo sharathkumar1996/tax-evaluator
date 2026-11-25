@@ -10,9 +10,8 @@ from finalscore import FINAL, final_scores
 from grader_core import summarise
 from metrics import rebuild_rows
 from report_pdf import build_report
-from roster_flag import callout_html, not_on_roster
-from ui.core import (admin_ok, course, ctx, data, global_filters, header, metrics, needs_db, parse_key, pct,
-                     report_name, ss)
+from ui.core import (admin_ok, course, ctx, data, excel_download, global_filters, header, metrics, needs_db,
+                     outsiders, parse_key, pct, report_name, ss, stamp)
 
 BASE_COLS = ["Student ID", "Name", "Batch", "Readiness", "Flags", "Attendance %", "Mocks evaluated", "Mocks due",
              "MCQ tests taken", "Marks so far", "% of possible so far"]
@@ -50,6 +49,30 @@ def _table(track, result):
     return None
 
 
+def _mocks_and_report(sid, improper):
+    """Mock-by-mock table, report download and (admin) delete - shared by both kinds of learner."""
+    mine = {e["case_id"]: e for e in data.evaluations if e["student_id"] == sid}
+    imp = improper[improper["Student ID"] == sid] if not improper.empty else improper
+    lab = {1: "On time", 0: "Late", None: "Not set"}
+    rows = []
+    for cid in data.final_cases:
+        e = mine.get(cid)
+        problem = "; ".join(imp.loc[imp["Case"] == cid, "Details"].astype(str)) if not imp.empty else ""
+        rows.append({"Mock": cid, "Title": (data.case_info.get(cid) or {}).get("title") or "",
+                     "Score /100": round(100 * (e["pct"] or 0), 1) if e else None,
+                     "Errors": e["errors"] if e else None,
+                     "Submission": lab.get(e.get("on_time")) if e else ("Improper" if problem else "Not received"),
+                     "Evaluated (UTC)": (e or {}).get("evaluated_at") or "", "Problem": problem})
+    st.markdown("##### Mock returns")
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True,
+                 column_config={"Score /100": st.column_config.ProgressColumn(format="%.1f", min_value=0,
+                                                                              max_value=100),
+                                "Problem": st.column_config.TextColumn(width="large")})
+    if not mine:
+        return
+    _report(sid, mine)
+
+
 def _profile(sid, c):
     t = c["track"].set_index("Student ID").loc[sid]
     st.divider()
@@ -64,27 +87,10 @@ def _profile(sid, c):
              ("Marks so far", "–" if pd.isna(t.get("Marks so far")) else f"{t['Marks so far']:g} / 100"),
              ("% of possible", pct(t.get("% of possible so far")))])
 
-    mine = {e["case_id"]: e for e in data.evaluations if e["student_id"] == sid}
-    imp = c["improper"]
-    imp = imp[imp["Student ID"] == sid] if not imp.empty else imp
-    lab = {1: "On time", 0: "Late", None: "Not set"}
-    rows = []
-    for cid in data.final_cases:
-        e = mine.get(cid)
-        problem = "; ".join(imp.loc[imp["Case"] == cid, "Details"].astype(str)) if not imp.empty and "Case" in imp \
-            else ""
-        rows.append({"Mock": cid, "Title": (data.case_info.get(cid) or {}).get("title") or "",
-                     "Score /100": round(100 * (e["pct"] or 0), 1) if e else None,
-                     "Errors": e["errors"] if e else None,
-                     "Submission": lab.get(e.get("on_time")) if e else ("Improper" if problem else "Not received"),
-                     "Evaluated (UTC)": (e or {}).get("evaluated_at") or "", "Problem": problem})
-    st.markdown("##### Mock returns")
-    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True,
-                 column_config={"Score /100": st.column_config.ProgressColumn(format="%.1f", min_value=0,
-                                                                              max_value=100),
-                                "Problem": st.column_config.TextColumn(width="large")})
-    if not mine:
-        return
+    _mocks_and_report(sid, c["improper"])
+
+
+def _report(sid, mine):
     r1, r2, r3 = st.columns([2, 1, 1])
     case_q = r1.selectbox("Evaluation report", list(mine), key=f"lr_case_{sid}", label_visibility="collapsed",
                           format_func=lambda x: f"Report for {x}")
@@ -112,11 +118,92 @@ def _profile(sid, c):
                 st.rerun()
 
 
+# ------------------------------------------------------------------ learners not on the roster
+def _add_to_roster(sid, name):
+    with st.form(f"add_{sid}", border=True):
+        st.markdown("**Add to the roster**")
+        st.caption("Their saved returns, on-time status and MCQ marks then count in results and batch reports.")
+        c1, c2 = st.columns(2)
+        nm = c1.text_input("Name", value=name or "")
+        em = c2.text_input("Deloitte email", placeholder="Used to match class attendance")
+        c3, c4 = st.columns(2)
+        b = c3.selectbox("Batch", data.batches + ["New batch…"])
+        nb = c4.text_input("New batch name", placeholder="Only if 'New batch…'")
+        if st.form_submit_button("Add to roster", type="primary"):
+            batch = (nb.strip() if b == "New batch…" else b) or "Unassigned"
+            if not nm.strip():
+                st.error("Enter the learner's name.")
+            else:
+                ctx.db.upsert_students([(sid, nm.strip(), batch, em.strip().lower() if "@" in em else "")])
+                ss.lr_scope_next = "roster"          # applied before the switch is drawn on the next run
+                st.toast(f"{sid} added to {batch}")
+                st.rerun()
+
+
+def _outsiders():
+    from offroster import CONSISTENT, IRREGULAR, LEVELS, LOW_SCORES
+    df = outsiders()
+    st.caption(f"Learners whose returns were marked but who are not on the roster. Deloitte may take on those who "
+               f"are consistent: **{CONSISTENT}** = submitted at least {data.off_min_rate:g}% of the mock returns held "
+               f"so far and averaged {data.off_min_avg:g}% or more (change under Setup → Settings).")
+    if df.empty:
+        st.success("Everyone whose return was marked is on the roster.")
+        return
+    cnt = df["Consistency"].value_counts()
+    metrics([("Tracked", len(df)), (CONSISTENT, int(cnt.get(CONSISTENT, 0))),
+             (LOW_SCORES, int(cnt.get(LOW_SCORES, 0))), (IRREGULAR, int(cnt.get(IRREGULAR, 0)))])
+    f1, f2 = st.columns([1, 2])
+    q = f1.text_input("Search", placeholder="Name or ID", key="or_q", label_visibility="collapsed")
+    lv = f2.pills("Consistency", LEVELS, selection_mode="multi", key="or_lv", label_visibility="collapsed")
+    v = df[df["Consistency"].isin(lv)] if lv else df
+    if q.strip():
+        v = v[v["Name"].str.contains(q, case=False, na=False) | v["Student ID"].str.contains(q, case=False, na=False)]
+    ev = st.dataframe(v, hide_index=True, use_container_width=True, on_select="rerun", selection_mode="single-row",
+                      key="or_table",
+                      column_config={"Submission rate %": st.column_config.ProgressColumn(
+                          format="%.0f%%", min_value=0, max_value=100),
+                          "Average score %": st.column_config.NumberColumn(format="%.1f"),
+                          "Latest score %": st.column_config.NumberColumn(format="%.1f")})
+    c1, c2 = st.columns([3, 1])
+    c1.caption(f"{len(v)} learner(s). Click a row to see their returns or add them to the roster.")
+    with c2:
+        excel_download("List (Excel)", [("Not on roster", v)], f"Learners_not_on_roster_{stamp()}.xlsx",
+                       key="or_xls")
+    rows = ev.selection.rows if ev and ev.selection else []
+    sid = v.iloc[rows[0]]["Student ID"] if rows else (v.iloc[0]["Student ID"] if len(v) == 1 and q.strip()
+                                                       else None)
+    if not sid:
+        return
+    r = v.set_index("Student ID").loc[sid]
+    st.divider()
+    st.subheader(f"{r['Name'] or 'Name not known'} · {sid}")
+    st.markdown(f"<span class='pill'>Not on roster</span><span class='pill'>{r['Consistency']}</span>"
+                f"<span class='pill'>{r['Trend']}</span>", unsafe_allow_html=True)
+    metrics([("Mocks submitted", f"{r['Mocks submitted']} / {r['Mocks held']}"),
+             ("On time", int(r["On time"])), ("Average score", pct(r["Average score %"])),
+             ("Latest score", pct(r["Latest score %"])), ("MCQ tests", int(r["MCQ tests taken"]))])
+    _mocks_and_report(sid, ctx.cache.get("outsiders_improper", pd.DataFrame(columns=["Student ID", "Case"])))
+    _add_to_roster(sid, r["Name"])
+
+
 def page():
     header("Learners", "Every learner in one place – attendance, mock returns, MCQs and marks so far.")
     if needs_db():
         return
     global_filters()
+    n_out = len(outsiders())
+    if ss.get("lr_scope_next"):
+        ss.lr_scope = ss.pop("lr_scope_next")
+    scope = st.segmented_control("Learners", ["roster", "outside"], default="roster", key="lr_scope",
+                                 label_visibility="collapsed",
+                                 format_func=lambda x: "On the roster" if x == "roster" else f"Not on roster ({n_out})")
+    if scope == "outside":
+        _outsiders()
+        return
+    _roster_view()
+
+
+def _roster_view():
     if not data.students:
         st.info("Add the roster under **Setup → Roster** first.")
         return
@@ -142,10 +229,5 @@ def page():
         result = fin[["Student ID", "Result"]]
         st.caption(f"Final result: Pass, or At risk below the pass mark of {data.cfg['pass_mark']:g}.")
     sid = _table(track, result)
-    off = not_on_roster(data.evaluations, list(data.roster), c["fc"])
-    if not off.empty:
-        st.markdown(callout_html(off["Student ID"].tolist(), "student(s) with evaluated mock returns are",
-                                 "Their returns are saved but not counted. Add them under <b>Setup → Roster</b>, or "
-                                 "erase them under Admin if they are test entries."), unsafe_allow_html=True)
     if sid:
         _profile(sid, c)

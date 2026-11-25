@@ -9,7 +9,8 @@ import streamlit as st
 from batchreport import ALL, batch_summary, improper_submissions, integrity_for, missing_returns, mock_table, \
     top_mistakes
 from finalscore import FINAL, SO_FAR, final_scores
-from ui.core import clean, course, ctx, data, global_filters, header, integrity, needs_db, prepared, ss, stamp
+from ui.core import (clean, course, ctx, data, global_filters, header, integrity, needs_db, outsiders, prepared,
+                     ss, stamp)
 
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
@@ -85,6 +86,22 @@ def _deloitte(c):
     prepared("dl_xlsx", "Prepare learner report",
              lambda: deloitte_workbook(track, classes(), ctx.institute, min_att=data.min_att, low_perf=data.low_perf),
              f"Deloitte_Form1040_Learner_Report_{stamp()}.xlsx", XLSX)
+    _not_on_roster()
+
+
+def _not_on_roster():
+    from offroster import CONSISTENT, LEVELS
+    from roster_flag import excel_bytes
+    df = outsiders()
+    st.markdown(f"**Learners not on the roster (Excel)** – everyone whose returns were marked without being on the "
+                f"roster, rated for consistency; {int((df['Consistency'] == CONSISTENT).sum())} of {len(df)} are "
+                f"consistent. One sheet per rating.")
+    if df.empty:
+        st.caption("Nobody to list.")
+        return
+    prepared("dl_off", "Prepare list", lambda: excel_bytes(
+        [("All", df)] + [(lv[:31].replace(",", ""), df[df["Consistency"] == lv]) for lv in LEVELS]),
+        f"Deloitte_Learners_not_on_roster_{stamp()}.xlsx", XLSX)
 
 
 def _management(c):

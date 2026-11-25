@@ -154,6 +154,14 @@ class Data:
     def low_perf(self):
         return float(self.settings.get("low_perf_pct") or self.cfg["pass_mark"])
 
+    @property
+    def off_min_rate(self):
+        return float(self.settings.get("offroster_min_rate") or 80)
+
+    @property
+    def off_min_avg(self):
+        return float(self.settings.get("offroster_min_avg") or self.cfg["pass_mark"])
+
     def runs(self, case_ids):
         key = "runs:" + ",".join(sorted(case_ids))
         def read():
@@ -188,6 +196,21 @@ def course():
         return {"studs": studs, "evs": evs, "fc": fc, "runs": runs, "improper": improper, "scores": scores,
                 "track": track}
     return _once("course", build)
+
+
+def outsiders():
+    """Learners with evaluated mock returns who are not on the roster, rated for consistency (offroster.py).
+    Uses the mock-return filter; batches don't apply - these learners have none yet."""
+    def build():
+        from offroster import candidates, names_from_runs
+        fc = mocks_selected()
+        runs = data.runs(fc)
+        from batchreport import improper_submissions
+        imp = improper_submissions([], [], runs, case_ids=fc, all_evaluations=data.evaluations)
+        ctx.cache["outsiders_improper"] = imp
+        return candidates(data.evaluations, list(data.roster), fc, data.mcq, imp, names_from_runs(runs),
+                          min_rate=data.off_min_rate, min_avg=data.off_min_avg)
+    return _once("outsiders", build)
 
 
 def integrity(case_ids):

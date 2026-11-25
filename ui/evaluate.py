@@ -186,8 +186,8 @@ def one_student(k):
         st.error("Student ID may only contain letters, digits and '-' (up to 40 characters).")
         sid = ""
     if ctx.save and sid and not known:
-        st.caption(f":material/warning: {sid} is not on the roster. It will be saved but won't count in results "
-                   "until it is added under Setup → Roster.")
+        st.caption(f":material/info: {sid} is not on the roster. The return is saved and tracked under "
+                   "Learners → Not on roster; it counts in batch results once the learner is added.")
     if st.button("Evaluate", type="primary", disabled=not pdfs or not sid, icon=":material/play_arrow:"):
         with st.spinner("Reading the return and marking it..."):
             files = [(f.name, f.getvalue()) for f in pdfs]
