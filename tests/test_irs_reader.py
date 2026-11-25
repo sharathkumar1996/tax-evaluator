@@ -130,3 +130,17 @@ def test_unsaved_blank_form_is_flagged():
 def test_damaged_pdf_message():
     with pytest.raises(ReaderError, match="damaged"):
         read_return([("folder/1040.pdf", b"%PDF-1.7 broken")])
+
+
+def test_empty_file_is_skipped_not_fatal():
+    """A 0-byte form is treated like a missing form: the rest of the return is still marked."""
+    r = read_return([("S1_M02/form 1040.pdf", fill(BLANK, SAMPLE_TEXT, CHECKS)), ("S1_M02/form 8949.pdf", b"")])
+    assert r.forms_found() == ["1040"]
+    assert r.value("1040", "1a")[0] == 98500
+    assert any("form 8949.pdf: the file is empty" in n for n in r.notes)
+    assert ("S1_M02/form 8949.pdf", "(empty file - not read)") in r.page_map
+
+
+def test_only_empty_files_is_still_an_error():
+    with pytest.raises(ReaderError, match="empty"):
+        read_return([("a.pdf", b""), ("b.pdf", b"")])
